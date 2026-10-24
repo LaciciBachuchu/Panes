@@ -291,6 +291,15 @@ struct SnapTab: View {
         Form {
             Section {
                 Toggle("Snap windows when dragged to screen edges and corners", isOn: $settings.data.snapEnabled)
+                if settings.data.snapEnabled && SystemTiling.isOn {
+                    HStack(alignment: .top) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Text("macOS's own edge tiling is on and will fight with Panes. Turn off “Drag windows to screen edges to tile” and “Drag windows to menu bar to fill screen” in Desktop & Dock → Windows.")
+                            .font(.callout)
+                        Spacer()
+                        Button("Open") { SystemTiling.openSettings() }
+                    }
+                }
                 Toggle("Restore original size when dragging a snapped window away", isOn: $settings.data.restoreSizeOnDragAway)
                 Toggle("Animate preview", isOn: $settings.data.previewAnimates)
                 Picker("Hold to drag without snapping", selection: $settings.data.disableSnapModifier) {
@@ -516,5 +525,19 @@ struct LayoutsTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// macOS 15+ has built-in drag-to-edge tiling that competes with Panes' snapping.
+enum SystemTiling {
+    static var isOn: Bool {
+        let d = UserDefaults(suiteName: "com.apple.WindowManager")
+        let edge = d?.object(forKey: "EnableTilingByEdgeDrag") as? Bool ?? true
+        let top = d?.object(forKey: "EnableTopTilingByEdgeDrag") as? Bool ?? true
+        return edge || top
+    }
+
+    static func openSettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Desktop-Settings.extension")!)
     }
 }

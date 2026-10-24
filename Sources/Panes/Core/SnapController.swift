@@ -14,6 +14,9 @@ final class SnapController {
     private var startMouse: CGPoint = .zero
     private var current: (area: SnapArea, screen: NSScreen)?
     private var pendingChecks = 0
+    /// Set when a drag starts inside a trigger band (e.g. a window right under the
+    /// menu bar): snapping stays off until the cursor has left the band once.
+    private var suppressUntilLeave = false
 
     private var settings: SettingsData { Settings.shared.data }
 
@@ -80,6 +83,9 @@ final class SnapController {
             if f.size != f0.size { state = .ignoring; return }       // a resize, not a move
             if f.origin != f0.origin {
                 state = .moving
+                if let screen = NSScreen.screen(containingAX: startMouse) {
+                    suppressUntilLeave = Self.area(at: startMouse, on: screen, settings: settings) != nil
+                }
                 beganMoving(w, frame: f, mouse: p)
             } else if pendingChecks > 25 {
                 state = .ignoring                                     // dragging content, not the window
@@ -100,6 +106,7 @@ final class SnapController {
 
     private func reset() {
         state = .idle
+        suppressUntilLeave = false
         window = nil
         startFrame = nil
         current = nil
@@ -120,10 +127,12 @@ final class SnapController {
     private func updatePreview(at p: CGPoint, flags: NSEvent.ModifierFlags) {
         guard settings.snapEnabled, !settings.disableSnapModifier.matches(flags),
               let screen = NSScreen.screen(containingAX: p), let area = Self.area(at: p, on: screen, settings: settings) else {
+            suppressUntilLeave = false
             current = nil
             PreviewOverlay.shared.hide()
             return
         }
+        if suppressUntilLeave { return }
         current = (area, screen)
         PreviewOverlay.shared.show(axFrame: WindowManager.shared.targetFrame(unit: area.target, screen: screen))
     }
@@ -131,20 +140,26 @@ final class SnapController {
     /// Finds the snap area under an AX-space point. Corners win over edges.
     static func area(at p: CGPoint, on screen: NSScreen, settings: SettingsData) -> SnapArea? {
         let f = screen.axFrame
+        let vf = screen.axVisibleFrame
         let t = CGFloat(settings.snapThreshold)
         let c = CGFloat(settings.cornerSize)
         let dl = p.x - f.minX, dr = f.maxX - 1 - p.x, dt = p.y - f.minY, db = f.maxY - 1 - p.y
+        // Each edge's trigger band also covers the menu bar / Dock on that side:
+        // people let go when they reach them rather than pushing to the last pixel,
+        // and holding at the very top invites Mission Control's Spaces bar.
+        let tl = max(t, vf.minX - f.minX + t), tr = max(t, f.maxX - vf.maxX + t)
+        let tt = max(t, vf.minY - f.minY + t), tb = max(t, f.maxY - vf.maxY + t)
 
         func hits(_ a: SnapArea) -> Bool {
             switch a.edge {
-            case .topLeft: return (dl <= t && dt <= c) || (dt <= t && dl <= c)
-            case .topRight: return (dr <= t && dt <= c) || (dt <= t && dr <= c)
-            case .bottomLeft: return (dl <= t && db <= c) || (db <= t && dl <= c)
-            case .bottomRight: return (dr <= t && db <= c) || (db <= t && dr <= c)
-            case .left: return dl <= t && inSeg(dt / f.height, a)
-            case .right: return dr <= t && inSeg(dt / f.height, a)
-            case .top: return dt <= t && inSeg(dl / f.width, a)
-            case .bottom: return db <= t && inSeg(dl / f.width, a)
+            case .topLeft: return (dl <= tl && dt <= c) || (dt <= tt && dl <= c)
+            case .topRight: return (dr <= tr && dt <= c) || (dt <= tt && dr <= c)
+            case .bottomLeft: return (dl <= tl && db <= c) || (db <= tb && dl <= c)
+            case .bottomRight: return (dr <= tr && db <= c) || (db <= tb && dr <= c)
+            case .left: return dl <= tl && inSeg(dt / f.height, a)
+            case .right: return dr <= tr && inSeg(dt / f.height, a)
+            case .top: return dt <= tt && inSeg(dl / f.width, a)
+            case .bottom: return db <= tb && inSeg(dl / f.width, a)
             }
         }
         func inSeg(_ v: CGFloat, _ a: SnapArea) -> Bool { v >= a.from && v <= a.to }
