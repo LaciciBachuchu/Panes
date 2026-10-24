@@ -5,7 +5,7 @@ import AppKit
 final class SnapController {
     static let shared = SnapController()
 
-    private enum State { case idle, pending, moving, ignoring }
+    private enum State { case idle, armed, pending, moving, ignoring }
 
     private var monitors: [Any] = []
     private var state: State = .idle
@@ -41,10 +41,17 @@ final class SnapController {
         }
     }
 
+    /// A click only records where it happened; the window lookup waits until the
+    /// mouse actually drags, so ordinary clicks cost nothing.
     private func mouseDown() {
         reset()
         guard settings.snapEnabled || settings.restoreSizeOnDragAway else { return }
         startMouse = Geometry.mouseAX
+        state = .armed
+    }
+
+    /// Finds the window under the original click once a drag begins.
+    private func arm() {
         guard let w = AXWindow.at(startMouse), w.pid != ProcessInfo.processInfo.processIdentifier,
               !Settings.shared.isExcluded(w.bundleID), let f = w.frame else {
             state = .ignoring
@@ -64,8 +71,10 @@ final class SnapController {
         switch state {
         case .idle, .ignoring:
             return
-        case .pending:
+        case .armed:
             guard hypot(p.x - startMouse.x, p.y - startMouse.y) > 3 else { return }
+            arm()
+        case .pending:
             pendingChecks += 1
             guard let w = window, let f0 = startFrame, let f = w.frame else { state = .ignoring; return }
             if f.size != f0.size { state = .ignoring; return }       // a resize, not a move

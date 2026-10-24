@@ -18,7 +18,8 @@ final class PaletteController: NSObject {
     private var monitors: [Any] = []
     private var waiting: DispatchWorkItem?
     private var pendingButton: AXUIElement?
-    private var lastCheck = Date.distantPast
+    private var lastMove = Date.distantPast
+    private var restCheckScheduled = false
     private var pollTimer: Timer?
     /// Opened by hotkey: stays until Esc, a click elsewhere, or a pick.
     private var sticky = false
@@ -50,23 +51,35 @@ final class PaletteController: NSObject {
 
     // MARK: Hover detection
 
+    /// Mouse moves only stamp a time. The (comparatively costly) accessibility
+    /// hit-test runs once the cursor has rested for a moment — the system menu
+    /// needs a ~1s rest anyway — so moving the mouse around costs next to nothing.
     private func mouseMoved() {
-        guard Settings.shared.data.paletteOnHover, panel?.isVisible != true else { return }
-        let now = Date()
-        guard now.timeIntervalSince(lastCheck) > 0.05 else { return }
-        lastCheck = now
+        // A pending wait tracks the cursor itself; an open palette needs no hover.
+        guard pendingButton == nil, panel?.isVisible != true else { return }
+        lastMove = Date()
+        guard !restCheckScheduled else { return }
+        restCheckScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.restDelay) { [weak self] in self?.restCheck() }
+    }
+
+    private static let restDelay: TimeInterval = 0.08
+
+    private func restCheck() {
+        let quiet = Date().timeIntervalSince(lastMove)
+        if quiet < Self.restDelay {
+            // Still moving: look again when it could have been still long enough.
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.restDelay - quiet) { [weak self] in self?.restCheck() }
+            return
+        }
+        restCheckScheduled = false
+        guard Settings.shared.data.paletteOnHover, pendingButton == nil, panel?.isVisible != true else { return }
 
         let p = Geometry.mouseAX
-        // While waiting, judge by geometry: the system menu can overlap the button
-        // and would make a second hit-test miss.
-        if let pb = pendingButton, let f = pb.frame, f.insetBy(dx: -4, dy: -4).contains(p) { return }
         let el = AXWindow.element(at: p)
         let sr = el?.subrole
         Debug.log("hover \(Int(p.x)),\(Int(p.y)) role=\(el?.role ?? "nil") subrole=\(sr ?? "nil")")
-        guard let el, let sr, Self.greenSubroles.contains(sr) else {
-            waiting?.cancel(); waiting = nil; pendingButton = nil
-            return
-        }
+        guard let el, let sr, Self.greenSubroles.contains(sr) else { return }
         waiting?.cancel()
         pendingButton = el
         waitForSystemMenu(button: el)

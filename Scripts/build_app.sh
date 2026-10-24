@@ -33,6 +33,8 @@ echo "Built $APP"
 
 if [ "${1:-}" = "--install" ]; then
     pkill -x Panes || true
+    # Wait for the old instance to exit, or `open` may just re-activate it.
+    for _ in $(seq 50); do pgrep -x Panes >/dev/null || break; sleep 0.1; done
     rm -rf /Applications/Panes.app
     cp -R "$APP" /Applications/
     open /Applications/Panes.app

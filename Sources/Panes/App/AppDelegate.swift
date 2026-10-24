@@ -21,7 +21,7 @@ enum Main {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
     private var onboardingWindow: NSWindow?
@@ -210,6 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             w.title = "Panes Settings"
+            w.delegate = self
             w.contentView = NSHostingView(rootView: SettingsView().environmentObject(Settings.shared))
             w.isReleasedWhenClosed = false
             w.center()
@@ -219,10 +220,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
+    /// Drop closed windows (and their SwiftUI trees) instead of keeping them around.
+    func windowWillClose(_ note: Notification) {
+        guard let w = note.object as? NSWindow else { return }
+        if w === settingsWindow {
+            // Defer so the window finishes closing before its last reference goes.
+            DispatchQueue.main.async { [weak self] in self?.settingsWindow = nil }
+        } else if w === onboardingWindow {
+            DispatchQueue.main.async { [weak self] in self?.onboardingWindow = nil }
+        }
+    }
+
     @objc func showOnboarding() {
         if onboardingWindow == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
             w.title = "Welcome to Panes"
+            w.delegate = self
             w.contentView = NSHostingView(rootView: OnboardingView())
             w.isReleasedWhenClosed = false
             w.center()

@@ -7,6 +7,9 @@ final class HoverMoveResize {
 
     private enum Mode { case move, resize }
     private var monitors: [Any] = []
+    /// Mouse-move monitor that exists only while the modifier combo is held, so
+    /// ordinary mouse movement never wakes Panes up.
+    private var moveMonitor: Any?
     private var mode: Mode?
     private var window: AXWindow?
     private var lastMouse: CGPoint = .zero
@@ -19,9 +22,6 @@ final class HoverMoveResize {
         if let m = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged, handler: { [weak self] e in self?.flagsChanged(e.modifierFlags) }) {
             monitors.append(m)
         }
-        if let m = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged], handler: { [weak self] _ in self?.mouseMoved() }) {
-            monitors.append(m)
-        }
     }
 
     func stop() {
@@ -32,6 +32,7 @@ final class HoverMoveResize {
 
     private func flagsChanged(_ f: NSEvent.ModifierFlags) {
         let s = Settings.shared.data
+        guard s.moveModifier != .none || s.resizeModifier != .none else { return }
         // Check resize first: its combo is usually a superset of the move combo.
         let newMode: Mode? = s.resizeModifier.matches(f) ? .resize : (s.moveModifier.matches(f) ? .move : nil)
         guard newMode != mode else { return }
@@ -46,11 +47,14 @@ final class HoverMoveResize {
         lastMouse = p
         corner = (p.x < fr.midX, p.y < fr.midY)
         if s.raiseOnHoverMove { w.raise() }
+        moveMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in self?.mouseMoved() }
     }
 
     private func end() {
         mode = nil
         window = nil
+        if let m = moveMonitor { NSEvent.removeMonitor(m) }
+        moveMonitor = nil
     }
 
     private func mouseMoved() {
