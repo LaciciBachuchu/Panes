@@ -1,6 +1,14 @@
 # Panes
 
-自用的 macOS 窗口管理器，合并了 BetterSnapTool 和 Moom 的功能。
+免费开源的 macOS 窗口管理器，合并了 BetterSnapTool 和 Moom 的功能。需要 macOS 14 或更新版本，Apple 芯片和 Intel 芯片都支持。
+
+## 安装
+
+1. 到 [Releases](https://github.com/LaciciBachuchu/Panes/releases/latest) 下载 `Panes.zip`，解压后把 `Panes.app` 拖进「应用程序」文件夹。
+2. 第一次打开时 macOS 会提示「无法验证开发者」，因为这个 App 没有经过 Apple 公证（那需要付费开发者账号）。点「完成」，然后打开 系统设置 → 隐私与安全性，在页面下方点「仍要打开」，再确认一次。
+   - 或者在终端运行：`xattr -dr com.apple.quarantine /Applications/Panes.app`，之后就能直接打开。
+3. 按提示在 系统设置 → 隐私与安全性 → 辅助功能 里打开 Panes。macOS 只允许有这个权限的 App 移动其他 App 的窗口，打开后 Panes 立即开始工作。
+4. 菜单栏会出现一个四宫格图标，设置都在里面。
 
 ## 功能
 
@@ -33,10 +41,17 @@
 | ⌃⌥⌘→ / ← | 移到下一个/上一个显示器 |
 | ⌃⌥P | 在当前窗口上打开面板（1–9 选预设，Esc 关闭） |
 
-## 构建
+## 自己编译
+
+需要 Xcode。
 
 ```bash
-Scripts/build_app.sh --install
+Scripts/build_app.sh --install    # 编译并安装到「应用程序」
+Scripts/build_app.sh --release    # 编译通用版本并打包成 build/Panes.zip
 ```
 
 脚本会自动用钥匙串里的「Panes Local Signing」代码签名证书签名，所以重新编译后辅助功能权限不会失效。没有这张证书时退回 ad-hoc 签名，每次编译后都要在辅助功能里把 Panes 删掉重加。
+
+## 许可证
+
+MIT
