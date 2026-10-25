@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 if AXIsProcessTrusted() {
                     RollUpController.shared.applySettings()
                     TitlebarGestures.shared.applySettings()
+                    PinController.shared.applySettings()
                 }
                 self?.updateStatusItem()
             }
@@ -111,6 +112,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             item.representedObject = a
             item.image = NSImage(systemSymbolName: a.symbol, accessibilityDescription: nil)
             if let sc = a.shortcut { applyShortcut(sc, to: item) }
+            menu.addItem(item)
+        }
+
+        let pinned = PinController.shared.menuEntries
+        if !pinned.isEmpty {
+            menu.addItem(.separator())
+            let item = NSMenuItem(title: "置顶的窗口（\(pinned.count)）", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for e in pinned {
+                let i = NSMenuItem(title: e.label, action: #selector(unpinWindow(_:)), keyEquivalent: "")
+                i.target = self
+                i.representedObject = NSNumber(value: e.id)
+                i.toolTip = "取消置顶"
+                i.image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: nil)
+                sub.addItem(i)
+            }
+            sub.addItem(.separator())
+            sub.addItem(withTitle: "全部取消置顶", action: #selector(unpinAll), keyEquivalent: "").target = self
+            item.submenu = sub
             menu.addItem(item)
         }
 
@@ -213,6 +233,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             Settings.shared.data.excludedBundleIDs.append(bid)
         }
     }
+
+    @objc private func unpinWindow(_ sender: NSMenuItem) {
+        guard let n = sender.representedObject as? NSNumber else { return }
+        PinController.shared.unpin(CGWindowID(n.uint32Value))
+    }
+
+    @objc private func unpinAll() { PinController.shared.unpinAll() }
 
     @objc private func toggleSnap() { Settings.shared.data.snapEnabled.toggle() }
 

@@ -10,6 +10,7 @@ struct FeaturesTab: View {
         Form {
             rollUpSection
             gestureSection
+            pinSection
         }
         .formStyle(.grouped)
         .onAppear { canCapture = WindowCapture.hasPermission }
@@ -65,12 +66,29 @@ struct FeaturesTab: View {
         }
     }
 
+    // MARK: 置顶
+
+    private var pinSection: some View {
+        Section {
+            Toggle("置顶窗口", isOn: $settings.data.pinEnabled)
+            if settings.data.pinEnabled {
+                LabeledContent("快捷键") { ShortcutRecorder(shortcut: shortcut(for: .pin)) }
+                permissionRow
+            }
+        } header: {
+            Text("置顶")
+        } footer: {
+            Text("按快捷键把当前窗口放到最上层，切到别的窗口也不会被盖住；再按一次取消。macOS 不允许直接把别的 App 的窗口放到最上层，Panes 用一层实时画面盖在最上面：指针移进去时，真窗口会被带到前面，可以照常点击、输入；指针离开后又换回画面。菜单栏里能看到所有置顶的窗口，也可以一次全部取消。需要屏幕录制权限。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
     @ViewBuilder private var permissionRow: some View {
         HStack {
             Image(systemName: canCapture ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                 .foregroundStyle(canCapture ? .green : .orange)
-            Text(canCapture ? "已允许屏幕录制，卷帘条和看一眼能显示窗口画面"
-                            : "没有屏幕录制权限时，看一眼只能显示提示文字")
+            Text(canCapture ? "已允许屏幕录制"
+                            : "还没有屏幕录制权限：看一眼只能显示提示文字，置顶无法使用")
                 .font(.callout)
             Spacer()
             if !canCapture {
