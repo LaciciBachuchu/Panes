@@ -44,7 +44,7 @@ final class HotKeyManager {
 
         let s = Settings.shared.data
         for action in s.actions {
-            guard let sc = action.shortcut else { continue }
+            guard let sc = action.shortcut, Settings.shared.isEnabled(action.kind) else { continue }
             register(sc) { WindowManager.shared.perform(action) }
         }
         for layout in s.layouts {

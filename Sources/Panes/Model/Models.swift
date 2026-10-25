@@ -50,6 +50,7 @@ struct Shortcut: Codable, Hashable {
 
     static let ctrlOpt = controlKey | optionKey
     static let ctrlOptCmd = controlKey | optionKey | cmdKey
+    static let ctrlOptShift = controlKey | optionKey | shiftKey
 }
 
 enum KeyNames {
@@ -94,8 +95,14 @@ enum ActionKind: String, Codable, CaseIterable, Identifiable {
     case larger
     case smaller
     case showPalette
+    case rollUp
+    case pin
+    case magicTiling
 
     var id: String { rawValue }
+
+    /// Kinds that belong to an optional feature with its own on/off switch.
+    var isFeatureAction: Bool { self == .rollUp || self == .pin || self == .magicTiling }
 
     var label: String {
         switch self {
@@ -110,6 +117,9 @@ enum ActionKind: String, Codable, CaseIterable, Identifiable {
         case .larger: return "Make larger"
         case .smaller: return "Make smaller"
         case .showPalette: return "Show palette"
+        case .rollUp: return "Roll up / unroll"
+        case .pin: return "Pin on top / unpin"
+        case .magicTiling: return "Magic tiling / undo"
         }
     }
 }
@@ -150,6 +160,9 @@ struct WindowAction: Codable, Identifiable, Hashable {
         case .larger: return "plus.square"
         case .smaller: return "minus.square"
         case .showPalette: return "square.grid.3x3"
+        case .rollUp: return "rectangle.topthird.inset.filled"
+        case .pin: return "pin"
+        case .magicTiling: return "rectangle.3.group"
         case .unitRect: return "rectangle.split.2x1"
         }
     }

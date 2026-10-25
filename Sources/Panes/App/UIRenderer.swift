@@ -12,6 +12,7 @@ enum UIRenderer {
             ("snapping", AnyView(SnapTab())),
             ("mouse", AnyView(MouseTab())),
             ("layouts", AnyView(LayoutsTab())),
+            ("features", AnyView(FeaturesTab())),
         ]
         for (name, view) in tabs {
             write(AnyView(view.environmentObject(s).padding(16)), size: CGSize(width: 760, height: 620), to: "\(dir)/\(name).png")

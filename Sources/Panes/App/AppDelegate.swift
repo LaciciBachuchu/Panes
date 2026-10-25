@@ -49,9 +49,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
             .sink { [weak self] _ in
                 HotKeyManager.shared.reload()
+                if AXIsProcessTrusted() { RollUpController.shared.applySettings() }
                 self?.updateStatusItem()
             }
             .store(in: &cancellables)
+    }
+
+    func applicationWillTerminate(_ note: Notification) {
+        // Never leave a window parked off screen, hidden or minimized behind a strip.
+        RollUpController.shared.unrollAll()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
@@ -67,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         HoverMoveResize.shared.start()
         PaletteController.shared.start()
         LayoutManager.shared.start()
+        RollUpController.shared.start()
     }
 
     // MARK: Menu bar

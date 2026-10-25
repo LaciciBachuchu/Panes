@@ -17,9 +17,15 @@ final class WindowManager {
     // MARK: Public entry points
 
     func perform(_ action: WindowAction, on target: AXWindow? = nil) {
-        if action.kind == .showPalette {
+        switch action.kind {
+        case .showPalette:
             PaletteController.shared.showForFocusedWindow()
             return
+        case .rollUp:
+            RollUpController.shared.toggle(target)
+            return
+        default:
+            break
         }
         guard let w = target ?? AXWindow.focused() else { NSSound.beep(); return }
         guard !Settings.shared.isExcluded(w.bundleID), !w.isFullScreen else { return }
@@ -143,7 +149,7 @@ final class WindowManager {
             r = r.intersection(vf)
             return r
 
-        case .showPalette:
+        case .showPalette, .rollUp, .pin, .magicTiling:
             return nil
         }
     }

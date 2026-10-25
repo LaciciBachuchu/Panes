@@ -10,6 +10,7 @@ struct SettingsView: View {
             SnapTab().tabItem { Label("Snapping", systemImage: "rectangle.split.2x2") }
             MouseTab().tabItem { Label("Palette & Mouse", systemImage: "cursorarrow.motionlines") }
             LayoutsTab().tabItem { Label("Layouts", systemImage: "square.on.square") }
+            FeaturesTab().tabItem { Label("窗口功能", systemImage: "sparkles.rectangle.stack") }
         }
         .padding(16)
         .frame(minWidth: 720, minHeight: 520)
