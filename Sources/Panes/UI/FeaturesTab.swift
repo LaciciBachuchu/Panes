@@ -27,6 +27,7 @@ struct FeaturesTab: View {
                 Toggle("双击标题栏卷起", isOn: $settings.data.rollUpOnDoubleClick)
                 if settings.data.rollUpOnDoubleClick {
                     Text(doubleClickNote).font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
                 }
                 Toggle("看一眼：指针停在卷帘条上时显示窗口内容", isOn: $settings.data.glanceEnabled)
                 if settings.data.glanceEnabled {
@@ -38,6 +39,7 @@ struct FeaturesTab: View {
         } footer: {
             Text("窗口收成一条和标题栏一样高的细条，留在原处；双击细条展开，细条可以拖动，展开时窗口出现在细条的位置。")
                 .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -64,6 +66,7 @@ struct FeaturesTab: View {
                 Text("浏览器标签页、地址栏这类自己会用横向滑动的地方，横向手势留给 App。")
             }
             .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -81,6 +84,7 @@ struct FeaturesTab: View {
         } footer: {
             Text("按快捷键把当前窗口放到最上层，切到别的窗口也不会被盖住；再按一次取消。macOS 不允许直接把别的 App 的窗口放到最上层，Panes 用一层实时画面盖在最上面：指针移进去时，真窗口会被带到前面，可以照常点击、输入；指针离开后又换回画面。菜单栏里能看到所有置顶的窗口，也可以一次全部取消。需要屏幕录制权限。")
                 .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -97,6 +101,7 @@ struct FeaturesTab: View {
         } footer: {
             Text("把当前显示器上所有可见窗口一次排满屏幕、互不重叠：最需要地方的窗口（浏览器、编辑器等）当主角，占一半到七成，留在它原来那一边；其余窗口按原来的上下左右次序排在旁边。窗口间距用“通用”里的设置。再按一次快捷键（或菜单里的“撤销魔法平铺”）撤销。")
                 .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
