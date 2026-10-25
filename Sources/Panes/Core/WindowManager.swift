@@ -29,6 +29,9 @@ final class WindowManager {
         case .slideOver:
             SlideOverController.shared.toggle(target)
             return
+        case .scrollStrip:
+            ScrollStrip.shared.toggle()
+            return
         default:
             break
         }
@@ -155,7 +158,7 @@ final class WindowManager {
             r = r.intersection(vf)
             return r
 
-        case .showPalette, .rollUp, .pin, .magicTiling, .carry, .slideOver:
+        case .showPalette, .rollUp, .pin, .magicTiling, .carry, .slideOver, .scrollStrip:
             return nil
         }
     }

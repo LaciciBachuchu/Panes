@@ -173,6 +173,15 @@ struct AXWindow: Hashable {
         }
     }
 
+    /// Size then position (twice the size, for apps that clamp against the current
+    /// screen), without pulling the window back on screen — for layouts that park
+    /// windows past the edge on purpose.
+    func setFrameUnclamped(_ r: CGRect) {
+        setSize(r.size)
+        setPosition(r.origin)
+        setSize(r.size)
+    }
+
     func raise() {
         AXUIElementPerformAction(element, kAXRaiseAction as CFString)
         app?.activate()

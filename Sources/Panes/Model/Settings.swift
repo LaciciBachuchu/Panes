@@ -45,6 +45,9 @@ struct SettingsData: Codable {
     // Split dividers
     var splitDividersEnabled = true
 
+    // Scroll strip
+    var scrollStripEnabled = false
+
     // Slide Over (experimental: off until the float-in-front hand-off works)
     var slideOverEnabled = false
     var slideOverDwell: Double = 0.5
@@ -74,7 +77,7 @@ struct SettingsData: Codable {
         d(.trackpadGesturesEnabled, &trackpadGesturesEnabled); d(.scrollWheelGesturesEnabled, &scrollWheelGesturesEnabled)
         d(.flingEnabled, &flingEnabled); d(.carryEnabled, &carryEnabled)
         d(.slideOverEnabled, &slideOverEnabled); d(.slideOverDwell, &slideOverDwell)
-        d(.splitDividersEnabled, &splitDividersEnabled)
+        d(.splitDividersEnabled, &splitDividersEnabled); d(.scrollStripEnabled, &scrollStripEnabled)
         actions.removeAll { $0.kind.isRemoved }
         // Default names were English before the menu went Chinese; renamed ones stay.
         for i in actions.indices { if let zh = Defaults.chineseNames[actions[i].name] { actions[i].name = zh } }
@@ -114,6 +117,7 @@ final class Settings: ObservableObject {
         case .rollUp, .pin, .magicTiling: return false
         case .carry: return data.carryEnabled
         case .slideOver: return data.slideOverEnabled
+        case .scrollStrip: return data.scrollStripEnabled
         default: return true
         }
     }
@@ -149,7 +153,7 @@ enum Defaults {
         "Maximize": "最大化", "Almost Maximize": "几乎最大化", "Maximize Height": "最大化高度",
         "Center": "居中", "Restore": "还原", "Larger": "放大", "Smaller": "缩小",
         "Next Display": "移到下一个显示器", "Previous Display": "移到上一个显示器",
-        "Show Palette": "显示面板", "Roll Up": "卷起", "Carry to Every Space": "带到每张桌面", "Slide Over": "侧拉",
+        "Show Palette": "显示面板", "Roll Up": "卷起", "Carry to Every Space": "带到每张桌面", "Slide Over": "侧拉", "Scroll Strip": "卷轴",
     ]
 
     static var actions: [WindowAction] {
@@ -191,6 +195,7 @@ enum Defaults {
             // ⌃⌥⌘ is held for hover-move, so newer features live on ⌃⌥⇧.
             k("Carry to Every Space", .carry, Shortcut(kVK_ANSI_G, Shortcut.ctrlOptShift)),
             k("Slide Over", .slideOver, Shortcut(kVK_ANSI_S, Shortcut.ctrlOptShift)),
+            k("Scroll Strip", .scrollStrip, Shortcut(kVK_ANSI_R, Shortcut.ctrlOptShift)),
         ]
     }
 

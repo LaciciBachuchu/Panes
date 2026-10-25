@@ -10,6 +10,7 @@ struct FeaturesTab: View {
         Form {
             gestureSection
             dividerSection
+            stripSection
             carrySection
             slideOverSection
         }
@@ -34,6 +35,23 @@ struct FeaturesTab: View {
                 Text("浏览器标签页、地址栏这类自己会用横向滑动的地方，横向手势留给 App。")
             }
             .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: 卷轴
+
+    private var stripSection: some View {
+        Section {
+            Toggle("卷轴", isOn: $settings.data.scrollStripEnabled)
+            if settings.data.scrollStripEnabled {
+                LabeledContent("快捷键") { ShortcutRecorder(shortcut: shortcut(for: .scrollStrip)) }
+            }
+        } header: {
+            Text("卷轴")
+        } footer: {
+            Text("按快捷键，当前屏幕上的窗口排成一条横着的卷轴：每列整屏高，宽度取三分之一、一半、三分之二或整屏；放不下的列停在屏幕外，只在边上露一条。在卷轴里的窗口标题栏上两指左右滑，整条跟着手指走，松手带惯性停到最近的一列；滚轮横滚一格走一列。指针停在露出来的那条上看一眼那扇窗口，点那条就滑过去；两指张开进概览，点哪扇就滑到哪一列。再按一次快捷键，窗口回到原处。")
+                .font(.caption).foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
         }
     }

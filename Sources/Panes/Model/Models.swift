@@ -101,14 +101,15 @@ enum ActionKind: String, Codable, CaseIterable, Identifiable {
     case magicTiling
     case carry
     case slideOver
+    case scrollStrip
 
     var id: String { rawValue }
 
     static var allCases: [ActionKind] { [.unitRect, .maximize, .almostMaximize, .maximizeHeight, .center, .restore,
-                                         .nextDisplay, .previousDisplay, .larger, .smaller, .showPalette, .carry, .slideOver] }
+                                         .nextDisplay, .previousDisplay, .larger, .smaller, .showPalette, .carry, .slideOver, .scrollStrip] }
 
     /// Kinds that belong to an optional feature with its own on/off switch.
-    var isFeatureAction: Bool { self == .carry || self == .slideOver }
+    var isFeatureAction: Bool { self == .carry || self == .slideOver || self == .scrollStrip }
     var isRemoved: Bool { self == .rollUp || self == .pin || self == .magicTiling }
 
     var label: String {
@@ -127,6 +128,7 @@ enum ActionKind: String, Codable, CaseIterable, Identifiable {
         case .rollUp, .pin, .magicTiling: return "Removed"
         case .carry: return "带到每张桌面"
         case .slideOver: return "侧拉"
+        case .scrollStrip: return "卷轴"
         }
     }
 }
@@ -170,6 +172,7 @@ struct WindowAction: Codable, Identifiable, Hashable {
         case .rollUp, .pin, .magicTiling: return "xmark"
         case .carry: return "rectangle.on.rectangle"
         case .slideOver: return "sidebar.right"
+        case .scrollStrip: return "rectangle.split.3x1"
         case .unitRect: return "rectangle.split.2x1"
         }
     }

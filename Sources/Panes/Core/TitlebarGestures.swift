@@ -35,6 +35,9 @@ final class TitlebarGestures {
         var armedAt: CGPoint?            // (dx, dy) when a side swipe first reached 56pt
         var samples: [(t: TimeInterval, dx: CGFloat, dy: CGFloat)] = []
         var cache: [String: Placement] = [:]
+        /// The window is a column of the scroll strip: sideways swipes move the strip.
+        var strip = false
+        var stripScrolling = false
     }
 
     private static let decide: CGFloat = 10
@@ -105,9 +108,25 @@ final class TitlebarGestures {
             let now = ProcessInfo.processInfo.systemUptime
             track!.samples.append((now, track!.dx, track!.dy))
             track!.samples.removeAll { now - $0.t > 0.08 }
-            update()
+            if track!.strip {
+                // Mostly sideways: the strip follows the fingers 1:1.
+                if !track!.stripScrolling, abs(track!.dx) >= Self.decide, abs(track!.dx) > abs(track!.dy) {
+                    track!.stripScrolling = true
+                    ScrollStrip.shared.scroll(by: track!.dx)
+                } else if track!.stripScrolling {
+                    ScrollStrip.shared.scroll(by: e.scrollingDeltaX)
+                }
+            } else {
+                update()
+            }
         }
-        if e.phase.contains(.ended) {
+        if e.phase.contains(.ended), track?.stripScrolling == true, let t = track {
+            // Coast with the release velocity, then stop on a column edge.
+            var v: CGFloat = 0
+            if let a = t.samples.first, let b = t.samples.last, b.t - a.t > 0.005 { v = (b.dx - a.dx) / CGFloat(b.t - a.t) }
+            ScrollStrip.shared.release(velocity: v)
+            track = nil
+        } else if e.phase.contains(.ended) {
             end()
         } else if e.phase.contains(.cancelled) {
             cancelTrack()
@@ -125,6 +144,7 @@ final class TitlebarGestures {
         // horizontal swipes there belong to the app.
         let owned = hit.chain.contains { Titlebar.usesHorizontalSwipes($0.role, subrole: $0.subrole) }
         track = Track(window: hit.window, frame: hit.frame, bar: hit.barHeight, anchor: p, horizontalOwnedByApp: owned)
+        track!.strip = ScrollStrip.shared.contains(hit.window) && !owned
         ignoringGesture = false
     }
 
@@ -248,6 +268,11 @@ final class TitlebarGestures {
         // Line-based wheel events: one line per notch, more when the wheel spins fast.
         let notches = max(1, Int(max(abs(dx), abs(dy)).rounded()))
         let now = Date()
+        if dir.horizontal, ScrollStrip.shared.isActive, Titlebar.mayBeTitlebar(Geometry.mouseAX),
+           let hit = Titlebar.hit(at: Geometry.mouseAX, allowControls: true), ScrollStrip.shared.contains(hit.window) {
+            for _ in 0..<notches { ScrollStrip.shared.step(dir == .right ? -1 : 1) }
+            return
+        }
         if var w = wheel, now.timeIntervalSince(w.last) < 0.6, w.dir == dir {
             w.last = now
             guard let win = w.window, !(dir.horizontal && w.owned) else { wheel = w; return }
@@ -329,7 +354,10 @@ final class TitlebarGestures {
         if phase.contains(.ended) || phase.contains(.cancelled) {
             defer { pinch = nil }
             guard phase.contains(.ended) else { GestureHUD.shared.cancel(); return }
-            if pn.total >= 0.22, let p = WindowManager.shared.fill(pn.window) {
+            if pn.total >= 0.22, ScrollStrip.shared.contains(pn.window) {
+                GestureHUD.shared.cancel()
+                ScrollStrip.shared.showOverview()
+            } else if pn.total >= 0.22, let p = WindowManager.shared.fill(pn.window) {
                 WindowManager.shared.execute(p, on: pn.window, animated: false)
                 GestureHUD.shared.finish()
             } else if pn.total <= -0.22, GesturePlacements.shared.canUndo(pn.window) {
