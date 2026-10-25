@@ -99,14 +99,15 @@ enum ActionKind: String, Codable, CaseIterable, Identifiable {
     case rollUp
     case pin
     case magicTiling
+    case carry
 
     var id: String { rawValue }
 
     static var allCases: [ActionKind] { [.unitRect, .maximize, .almostMaximize, .maximizeHeight, .center, .restore,
-                                         .nextDisplay, .previousDisplay, .larger, .smaller, .showPalette] }
+                                         .nextDisplay, .previousDisplay, .larger, .smaller, .showPalette, .carry] }
 
     /// Kinds that belong to an optional feature with its own on/off switch.
-    var isFeatureAction: Bool { false }
+    var isFeatureAction: Bool { self == .carry }
     var isRemoved: Bool { self == .rollUp || self == .pin || self == .magicTiling }
 
     var label: String {
@@ -123,6 +124,7 @@ enum ActionKind: String, Codable, CaseIterable, Identifiable {
         case .smaller: return "Make smaller"
         case .showPalette: return "Show palette"
         case .rollUp, .pin, .magicTiling: return "Removed"
+        case .carry: return "带到每张桌面"
         }
     }
 }
@@ -164,6 +166,7 @@ struct WindowAction: Codable, Identifiable, Hashable {
         case .smaller: return "minus.square"
         case .showPalette: return "square.grid.3x3"
         case .rollUp, .pin, .magicTiling: return "xmark"
+        case .carry: return "rectangle.on.rectangle"
         case .unitRect: return "rectangle.split.2x1"
         }
     }

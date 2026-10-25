@@ -9,6 +9,7 @@ struct FeaturesTab: View {
     var body: some View {
         Form {
             gestureSection
+            carrySection
         }
         .formStyle(.grouped)
         .onAppear { canCapture = WindowCapture.hasPermission }
@@ -32,6 +33,40 @@ struct FeaturesTab: View {
             }
             .font(.caption).foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: 带到每张桌面
+
+    private var carrySection: some View {
+        Section {
+            Toggle("带到每张桌面", isOn: $settings.data.carryEnabled)
+            if settings.data.carryEnabled {
+                LabeledContent("快捷键") { ShortcutRecorder(shortcut: shortcut(for: .carry)) }
+                permissionRow
+            }
+        } header: {
+            Text("带到每张桌面")
+        } footer: {
+            Text("按快捷键，当前窗口留在原处；切到别的桌面时，右上角出现它的细条。指针停在细条上看它现在的样子，单击回到那扇窗口，点细条右边的叉或再按一次快捷键就不再带着。看实时画面需要屏幕录制权限。")
+                .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder private var permissionRow: some View {
+        HStack {
+            Image(systemName: canCapture ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                .foregroundStyle(canCapture ? .green : .orange)
+            Text(canCapture ? "已允许屏幕录制" : "还没有屏幕录制权限：只能显示文字，看不到画面")
+                .font(.callout)
+            Spacer()
+            if !canCapture {
+                Button("去允许") {
+                    WindowCapture.requestPermission()
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+                }
+            }
         }
     }
 

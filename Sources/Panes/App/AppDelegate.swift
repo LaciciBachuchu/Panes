@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 HotKeyManager.shared.reload()
                 if AXIsProcessTrusted() {
                     TitlebarGestures.shared.applySettings()
+                    CarryController.shared.applySettings()
                 }
                 self?.updateStatusItem()
             }
@@ -71,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         PaletteController.shared.start()
         LayoutManager.shared.start()
         TitlebarGestures.shared.applySettings()
+        CarryController.shared.applySettings()
     }
 
     // MARK: Menu bar
@@ -124,6 +126,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         arrange.submenu = arrangeMenu
         menu.addItem(arrange)
+
+        let carried = CarryController.shared.menuEntries
+        if !carried.isEmpty {
+            let item = NSMenuItem(title: "带到每张桌面的窗口（\(carried.count)）", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for e in carried {
+                let i = NSMenuItem(title: e.label, action: #selector(openCarried(_:)), keyEquivalent: "")
+                i.target = self
+                i.representedObject = NSNumber(value: e.id)
+                sub.addItem(i)
+            }
+            sub.addItem(.separator())
+            sub.addItem(withTitle: "全部不再带着", action: #selector(stopAllCarried), keyEquivalent: "").target = self
+            item.submenu = sub
+            menu.addItem(item)
+        }
 
         menu.addItem(.separator())
         let layouts = NSMenuItem(title: "布局", action: nil, keyEquivalent: "")
@@ -233,6 +251,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             Settings.shared.data.excludedBundleIDs.append(bid)
         }
     }
+
+    @objc private func openCarried(_ sender: NSMenuItem) {
+        guard let n = sender.representedObject as? NSNumber else { return }
+        CarryController.shared.open(CGWindowID(n.uint32Value))
+    }
+
+    @objc private func stopAllCarried() { CarryController.shared.stopAll() }
 
     @objc private func toggleSnap() { Settings.shared.data.snapEnabled.toggle() }
 
