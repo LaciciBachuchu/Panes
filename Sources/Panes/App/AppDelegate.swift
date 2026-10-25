@@ -49,7 +49,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
             .sink { [weak self] _ in
                 HotKeyManager.shared.reload()
-                if AXIsProcessTrusted() { RollUpController.shared.applySettings() }
+                if AXIsProcessTrusted() {
+                    RollUpController.shared.applySettings()
+                    TitlebarGestures.shared.applySettings()
+                }
                 self?.updateStatusItem()
             }
             .store(in: &cancellables)
@@ -74,6 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         PaletteController.shared.start()
         LayoutManager.shared.start()
         RollUpController.shared.start()
+        TitlebarGestures.shared.applySettings()
     }
 
     // MARK: Menu bar

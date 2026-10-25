@@ -18,11 +18,14 @@ final class SnapController {
     /// Set when a drag starts inside a trigger band (e.g. a window right under the
     /// menu bar): snapping stays off until the cursor has left the band once.
     private var suppressUntilLeave = false
+    /// Recent pointer positions while moving, for the fling's release velocity.
+    private var samples: [(t: TimeInterval, p: CGPoint)] = []
 
     private var settings: SettingsData { Settings.shared.data }
 
     func start() {
         stop()
+        Self.installDebugHook()
         let mask: [NSEvent.EventTypeMask] = [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
         for m in mask {
             if let mon = NSEvent.addGlobalMonitorForEvents(matching: m, handler: { [weak self] e in self?.handle(e) }) {
@@ -58,7 +61,8 @@ final class SnapController {
     private func arm() {
         guard let w = AXWindow.at(startMouse), w.pid != ProcessInfo.processInfo.processIdentifier,
               !Settings.shared.isExcluded(w.bundleID), let f = w.frame else {
-            Debug.log("snap: no window at \(startMouse)")
+            let w = AXWindow.at(startMouse)
+            Debug.log("snap: no window at \(startMouse) hit=\(w?.bundleID ?? "nil") pid=\(w?.pid ?? 0) frame=\(String(describing: w?.frame)) role=\(AXWindow.element(at: startMouse)?.role ?? "nil")")
             state = .ignoring
             return
         }
@@ -98,6 +102,9 @@ final class SnapController {
                 state = .ignoring                                     // dragging content, not the window
             }
         case .moving:
+            let now = ProcessInfo.processInfo.systemUptime
+            samples.append((now, p))
+            samples.removeAll { now - $0.t > 0.08 }
             updatePreview(at: p, flags: e.modifierFlags)
         }
     }
@@ -105,7 +112,15 @@ final class SnapController {
     private func mouseUp() {
         defer { reset() }
         Debug.log("snap: mouseUp state=\(state) area=\(current?.area.summary ?? "nil")")
-        guard state == .moving, let w = window, let hit = current else { return }
+        guard state == .moving, let w = window else { return }
+        // Released in a snap area → snap. Otherwise a fast enough throw → fling.
+        guard let hit = current else {
+            if settings.flingEnabled, !settings.disableSnapModifier.matches(NSEvent.modifierFlags),
+               let v = releaseVelocity() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { Self.fling(w, velocity: v) }
+            }
+            return
+        }
         // Let the app finish its own drag before we reposition.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
             WindowManager.shared.place(w, unit: hit.area.target, on: hit.screen)
@@ -114,6 +129,7 @@ final class SnapController {
 
     private func reset() {
         state = .idle
+        samples.removeAll()
         suppressUntilLeave = false
         window = nil
         windowID = nil
@@ -144,6 +160,56 @@ final class SnapController {
         if suppressUntilLeave { return }
         current = (area, screen)
         PreviewOverlay.shared.show(axFrame: WindowManager.shared.targetFrame(unit: area.target, screen: screen))
+    }
+
+    // MARK: Fling
+
+    /// Pointer velocity (pt/s, AX space) over the last 50ms, if it was a throw.
+    private func releaseVelocity() -> CGVector? {
+        let now = ProcessInfo.processInfo.systemUptime
+        let recent = samples.filter { now - $0.t <= 0.05 }
+        guard let first = recent.first, let last = recent.last, last.t - first.t > 0.008 else { return nil }
+        let dt = CGFloat(last.t - first.t)
+        let v = CGVector(dx: (last.p.x - first.p.x) / dt, dy: (last.p.y - first.p.y) / dt)
+        return hypot(v.dx, v.dy) >= Self.flingSpeed ? v : nil
+    }
+
+    private static let flingSpeed: CGFloat = 1500
+
+    /// Up = roll up (a gesture fill is undone first), down = fill, sideways = half,
+    /// diagonal = that corner. The window glides there.
+    /// Debug builds of the behaviour only (PanesDebug on): replay a fling on the
+    /// focused window from `dx,dy` in a distributed notification, so the direction
+    /// mapping and glide can be checked without a real hand on a mouse.
+    static func installDebugHook() {
+        guard Debug.enabled else { return }
+        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("local.thomas.panes.debug.fling"),
+                                                            object: nil, queue: .main) { note in
+            guard let parts = (note.object as? String)?.split(separator: ",").compactMap({ Double($0) }), parts.count == 2,
+                  let w = AXWindow.focused() else { return }
+            fling(w, velocity: CGVector(dx: parts[0], dy: parts[1]))
+        }
+    }
+
+    private static func fling(_ w: AXWindow, velocity v: CGVector) {
+        let angle = atan2(-v.dy, v.dx) * 180 / .pi      // 0 = right, 90 = up (AX y grows down)
+        let wm = WindowManager.shared
+        let p: Placement?
+        switch angle {
+        case 67.5..<112.5:
+            p = GesturePlacements.shared.gestureFilled(w) ? Placement(kind: .unfill, title: "还原")
+                : (Settings.shared.data.rollUpEnabled ? Placement(kind: .rollUp, title: "卷起") : nil)
+        case -112.5 ..< -67.5: p = wm.fill(w)
+        case -22.5..<22.5: p = wm.half(w, side: .right)
+        case 157.5...180, -180 ..< -157.5: p = wm.half(w, side: .left)
+        case 22.5..<67.5: p = wm.corner(w, side: .right, top: true)
+        case 112.5..<157.5: p = wm.corner(w, side: .left, top: true)
+        case -67.5 ..< -22.5: p = wm.corner(w, side: .right, top: false)
+        default: p = wm.corner(w, side: .left, top: false)
+        }
+        guard let p else { return }
+        Debug.log("fling: \(Int(angle))° → \(p.title)")
+        wm.execute(p, on: w, animated: true)
     }
 
     /// Finds the snap area under an AX-space point. Corners win over edges.

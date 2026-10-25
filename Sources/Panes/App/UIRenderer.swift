@@ -24,6 +24,11 @@ enum UIRenderer {
         model.keyboardHint = true
         write(AnyView(PaletteView(model: model)), size: nil, to: "\(dir)/palette.png")
         write(AnyView(OnboardingView()), size: nil, to: "\(dir)/onboarding.png")
+        for (name, title, symbol, progress, reversed) in [("hud-left", "左 ⅔", "rectangle.lefthalf.inset.filled", 0.6, true),
+                                                          ("hud-armed", "铺满", "rectangle.inset.filled", 1.0, false)] {
+            let m = HUDModel(); m.title = title; m.symbol = symbol; m.progress = progress; m.reversed = reversed
+            write(AnyView(HUDView(model: m).padding(10)), size: nil, to: "\(dir)/\(name).png")
+        }
     }
 
     private static func write(_ view: AnyView, size: CGSize?, to path: String) {
