@@ -11,6 +11,7 @@ struct FeaturesTab: View {
             rollUpSection
             gestureSection
             pinSection
+            magicSection
         }
         .formStyle(.grouped)
         .onAppear { canCapture = WindowCapture.hasPermission }
@@ -79,6 +80,22 @@ struct FeaturesTab: View {
             Text("置顶")
         } footer: {
             Text("按快捷键把当前窗口放到最上层，切到别的窗口也不会被盖住；再按一次取消。macOS 不允许直接把别的 App 的窗口放到最上层，Panes 用一层实时画面盖在最上面：指针移进去时，真窗口会被带到前面，可以照常点击、输入；指针离开后又换回画面。菜单栏里能看到所有置顶的窗口，也可以一次全部取消。需要屏幕录制权限。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: 魔法平铺
+
+    private var magicSection: some View {
+        Section {
+            Toggle("魔法平铺", isOn: $settings.data.magicTilingEnabled)
+            if settings.data.magicTilingEnabled {
+                LabeledContent("快捷键") { ShortcutRecorder(shortcut: shortcut(for: .magicTiling)) }
+            }
+        } header: {
+            Text("魔法平铺")
+        } footer: {
+            Text("把当前显示器上所有可见窗口一次排满屏幕、互不重叠：最需要地方的窗口（浏览器、编辑器等）当主角，占一半到七成，留在它原来那一边；其余窗口按原来的上下左右次序排在旁边。窗口间距用“通用”里的设置。再按一次快捷键（或菜单里的“撤销魔法平铺”）撤销。")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

@@ -115,6 +115,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             menu.addItem(item)
         }
 
+        if s.magicTilingEnabled {
+            menu.addItem(.separator())
+            let undo = MagicTiling.shared.canUndo
+            let item = NSMenuItem(title: undo ? "撤销魔法平铺" : "魔法平铺", action: #selector(magicTiling), keyEquivalent: "")
+            item.target = self
+            item.image = NSImage(systemSymbolName: undo ? "arrow.uturn.backward" : "rectangle.3.group", accessibilityDescription: nil)
+            if let sc = s.actions.first(where: { $0.kind == .magicTiling })?.shortcut { applyShortcut(sc, to: item) }
+            menu.addItem(item)
+        }
+
         let pinned = PinController.shared.menuEntries
         if !pinned.isEmpty {
             menu.addItem(.separator())
@@ -240,6 +250,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc private func unpinAll() { PinController.shared.unpinAll() }
+
+    @objc private func magicTiling() {
+        // Let the menu close and focus return to the previous app first.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MagicTiling.shared.toggle() }
+    }
 
     @objc private func toggleSnap() { Settings.shared.data.snapEnabled.toggle() }
 

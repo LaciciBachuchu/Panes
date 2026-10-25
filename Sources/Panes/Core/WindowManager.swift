@@ -27,6 +27,9 @@ final class WindowManager {
         case .pin:
             PinController.shared.toggle(target)
             return
+        case .magicTiling:
+            MagicTiling.shared.toggle()
+            return
         default:
             break
         }
