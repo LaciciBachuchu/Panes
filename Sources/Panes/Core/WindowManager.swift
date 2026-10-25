@@ -21,10 +21,7 @@ final class WindowManager {
         case .showPalette:
             PaletteController.shared.showForFocusedWindow()
             return
-        case .rollUp:
-            RollUpController.shared.toggle(target)
-            return
-        case .pin, .magicTiling:
+        case .rollUp, .pin, .magicTiling:
             return
         default:
             break

@@ -166,7 +166,6 @@ final class TitlebarGestures {
             let travel = (dir == .right ? t.dx : -t.dx) + extra
             if travel >= Self.armed, t.armedAt == nil { t.armedAt = CGPoint(x: t.dx, y: t.dy) }
             if travel < Self.armed * 0.8 { t.armedAt = nil }
-            if RollUpController.shared.isRolled(t.window) { return nil }
             let side: Side = dir == .left ? .left : .right
             // Turning after an armed side swipe: corner on that side.
             if let a = t.armedAt {
@@ -196,24 +195,16 @@ final class TitlebarGestures {
                 track = t
             }
             guard let p = t.cache[key] else { return nil }
-            let sym = p.kind == .rollUp ? "rectangle.topthird.inset.filled"
-                    : (p.kind == .unfill ? "arrow.uturn.backward" : "rectangle.inset.filled")
+            let sym = p.kind == .unfill ? "arrow.uturn.backward" : "rectangle.inset.filled"
             return (p, travel / Self.armed, false, sym)
         }
     }
 
-    /// Down on a rolled-up window unrolls it; otherwise down fills.
-    private func downPlacement(_ w: AXWindow) -> Placement? {
-        if RollUpController.shared.isRolled(w) { return Placement(kind: .unroll, title: "展开") }
-        return WindowManager.shared.fill(w)
-    }
+    private func downPlacement(_ w: AXWindow) -> Placement? { WindowManager.shared.fill(w) }
 
-    /// Up: undo a gesture fill first, else roll up (when roll-up is on).
+    /// Up undoes a fill made by a gesture; otherwise it does nothing.
     private func upPlacement(_ w: AXWindow) -> Placement? {
-        if RollUpController.shared.isRolled(w) { return nil }
-        if GesturePlacements.shared.gestureFilled(w) { return Placement(kind: .unfill, title: "还原") }
-        guard settings.rollUpEnabled else { return nil }
-        return Placement(kind: .rollUp, title: "卷起")
+        GesturePlacements.shared.gestureFilled(w) ? Placement(kind: .unfill, title: "还原") : nil
     }
 
     private func end() {
@@ -289,10 +280,9 @@ final class TitlebarGestures {
         let p: Placement?
         let symbol: String
         switch w.dir {
-        case .up: p = upPlacement(win); symbol = "rectangle.topthird.inset.filled"
+        case .up: p = upPlacement(win); symbol = "arrow.uturn.backward"
         case .down: p = downPlacement(win); symbol = "rectangle.inset.filled"
         case .left, .right:
-            if RollUpController.shared.isRolled(win) { return }
             let side: Side = w.dir == .left ? .left : .right
             p = WindowManager.shared.ladder(win, side: side)
             symbol = side == .left ? "rectangle.lefthalf.inset.filled" : "rectangle.righthalf.inset.filled"

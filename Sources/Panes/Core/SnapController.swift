@@ -197,8 +197,7 @@ final class SnapController {
         let p: Placement?
         switch angle {
         case 67.5..<112.5:
-            p = GesturePlacements.shared.gestureFilled(w) ? Placement(kind: .unfill, title: "还原")
-                : (Settings.shared.data.rollUpEnabled ? Placement(kind: .rollUp, title: "卷起") : nil)
+            p = GesturePlacements.shared.gestureFilled(w) ? Placement(kind: .unfill, title: "还原") : nil
         case -112.5 ..< -67.5: p = wm.fill(w)
         case -22.5..<22.5: p = wm.half(w, side: .right)
         case 157.5...180, -180 ..< -157.5: p = wm.half(w, side: .left)

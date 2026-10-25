@@ -34,11 +34,6 @@ struct SettingsData: Codable {
     var layouts: [Layout] = []
     var skipMinimizedOnRestore = true
 
-    // Roll up (卷起) and glance (看一眼)
-    var rollUpEnabled = true
-    var rollUpOnDoubleClick = true
-    var glanceEnabled = true
-
     // Titlebar gestures
     var trackpadGesturesEnabled = true
     var scrollWheelGesturesEnabled = true
@@ -66,7 +61,6 @@ struct SettingsData: Codable {
         d(.moveModifier, &moveModifier); d(.resizeModifier, &resizeModifier); d(.raiseOnHoverMove, &raiseOnHoverMove)
         d(.layouts, &layouts); d(.skipMinimizedOnRestore, &skipMinimizedOnRestore)
         d(.excludedBundleIDs, &excludedBundleIDs); d(.showMenuBarIcon, &showMenuBarIcon)
-        d(.rollUpEnabled, &rollUpEnabled); d(.rollUpOnDoubleClick, &rollUpOnDoubleClick); d(.glanceEnabled, &glanceEnabled)
         d(.trackpadGesturesEnabled, &trackpadGesturesEnabled); d(.scrollWheelGesturesEnabled, &scrollWheelGesturesEnabled)
         d(.flingEnabled, &flingEnabled)
         actions.removeAll { $0.kind.isRemoved }
@@ -105,8 +99,7 @@ final class Settings: ObservableObject {
     /// Whether an action's feature is switched on (always true for plain actions).
     func isEnabled(_ kind: ActionKind) -> Bool {
         switch kind {
-        case .rollUp: return data.rollUpEnabled
-        case .pin, .magicTiling: return false
+        case .rollUp, .pin, .magicTiling: return false
         default: return true
         }
     }
@@ -181,8 +174,6 @@ enum Defaults {
             k("Next Display", .nextDisplay, Shortcut(kVK_RightArrow, Shortcut.ctrlOptCmd), palette: true),
             k("Previous Display", .previousDisplay, Shortcut(kVK_LeftArrow, Shortcut.ctrlOptCmd)),
             k("Show Palette", .showPalette, Shortcut(kVK_ANSI_P, m)),
-            // ⌃⌥⌘ is held for hover-move, so the newer features live on ⌃⌥⇧.
-            k("Roll Up", .rollUp, Shortcut(kVK_ANSI_C, Shortcut.ctrlOptShift)),
         ]
     }
 

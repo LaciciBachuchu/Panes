@@ -50,17 +50,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             .sink { [weak self] _ in
                 HotKeyManager.shared.reload()
                 if AXIsProcessTrusted() {
-                    RollUpController.shared.applySettings()
                     TitlebarGestures.shared.applySettings()
                 }
                 self?.updateStatusItem()
             }
             .store(in: &cancellables)
-    }
-
-    func applicationWillTerminate(_ note: Notification) {
-        // Never leave a window parked off screen, hidden or minimized behind a strip.
-        RollUpController.shared.unrollAll()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
@@ -76,9 +70,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         HoverMoveResize.shared.start()
         PaletteController.shared.start()
         LayoutManager.shared.start()
-        RollUpController.shared.start()
-        // Glance shows a picture of the window; macOS only lets the user grant that.
-        if Settings.shared.data.glanceEnabled && !WindowCapture.hasPermission { WindowCapture.requestPermission() }
         TitlebarGestures.shared.applySettings()
     }
 
@@ -124,7 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let arrange = NSMenuItem(title: "摆放当前窗口", action: nil, keyEquivalent: "")
         arrange.image = NSImage(systemSymbolName: "rectangle.split.2x2", accessibilityDescription: nil)
         let arrangeMenu = NSMenu()
-        let groups = Dictionary(grouping: s.actions.filter { $0.inMenu && $0.kind != .rollUp }, by: MenuGroup.of)
+        let groups = Dictionary(grouping: s.actions.filter(\.inMenu), by: MenuGroup.of)
         for g in MenuGroup.allCases {
             guard let items = groups[g], !items.isEmpty else { continue }
             if arrangeMenu.numberOfItems > 0 { arrangeMenu.addItem(.separator()) }
@@ -133,11 +124,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         arrange.submenu = arrangeMenu
         menu.addItem(arrange)
-        if s.rollUpEnabled, let roll = s.actions.first(where: { $0.kind == .rollUp }) {
-            let item = actionItem(roll)
-            item.title = "卷起 / 展开当前窗口"
-            menu.addItem(item)
-        }
 
         menu.addItem(.separator())
         let layouts = NSMenuItem(title: "布局", action: nil, keyEquivalent: "")
