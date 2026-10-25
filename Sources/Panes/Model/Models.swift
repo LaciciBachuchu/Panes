@@ -96,13 +96,18 @@ enum ActionKind: String, Codable, CaseIterable, Identifiable {
     case smaller
     case showPalette
     case rollUp
+    // Removed features; kept so settings saved by earlier builds still decode.
     case pin
     case magicTiling
 
     var id: String { rawValue }
 
+    static var allCases: [ActionKind] { [.unitRect, .maximize, .almostMaximize, .maximizeHeight, .center, .restore,
+                                         .nextDisplay, .previousDisplay, .larger, .smaller, .showPalette, .rollUp] }
+
     /// Kinds that belong to an optional feature with its own on/off switch.
-    var isFeatureAction: Bool { self == .rollUp || self == .pin || self == .magicTiling }
+    var isFeatureAction: Bool { self == .rollUp }
+    var isRemoved: Bool { self == .pin || self == .magicTiling }
 
     var label: String {
         switch self {
@@ -118,8 +123,7 @@ enum ActionKind: String, Codable, CaseIterable, Identifiable {
         case .smaller: return "Make smaller"
         case .showPalette: return "Show palette"
         case .rollUp: return "Roll up / unroll"
-        case .pin: return "Pin on top / unpin"
-        case .magicTiling: return "Magic tiling / undo"
+        case .pin, .magicTiling: return "Removed"
         }
     }
 }
@@ -161,8 +165,7 @@ struct WindowAction: Codable, Identifiable, Hashable {
         case .smaller: return "minus.square"
         case .showPalette: return "square.grid.3x3"
         case .rollUp: return "rectangle.topthird.inset.filled"
-        case .pin: return "pin"
-        case .magicTiling: return "rectangle.3.group"
+        case .pin, .magicTiling: return "xmark"
         case .unitRect: return "rectangle.split.2x1"
         }
     }

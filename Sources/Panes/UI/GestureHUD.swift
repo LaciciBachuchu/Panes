@@ -29,6 +29,7 @@ final class GestureHUD {
     /// Shows or updates the bubble. `anchor` is the AX point it hangs under.
     func update(title: String, symbol: String, progress: CGFloat, reversed: Bool, anchor: CGPoint) {
         hideWork?.cancel()
+        model.messageOnly = false
         model.title = title
         model.symbol = symbol
         model.progress = max(0, min(1, progress))
@@ -46,6 +47,13 @@ final class GestureHUD {
             panel.orderFrontRegardless()
             NSAnimationContext.runAnimationGroup { $0.duration = 0.12; panel.animator().alphaValue = 1 }
         }
+    }
+
+    /// A one-line note (no progress bar), e.g. "this window can't be rolled up".
+    func flash(_ title: String, symbol: String = "exclamationmark.circle", anchor: CGPoint) {
+        update(title: title, symbol: symbol, progress: 0, reversed: false, anchor: anchor)
+        model.messageOnly = true
+        fadeOut(after: 1.2, duration: 0.25)
     }
 
     /// After the action ran: linger 0.45s, then fade.
@@ -73,6 +81,7 @@ final class HUDModel: ObservableObject {
     @Published var symbol = "macwindow"
     @Published var progress: CGFloat = 0
     @Published var reversed = false
+    @Published var messageOnly = false
 }
 
 struct HUDView: View {
@@ -81,6 +90,10 @@ struct HUDView: View {
     var body: some View {
         let armed = model.progress >= 1
         VStack(spacing: 8) {
+            if model.messageOnly {
+                Label(model.title, systemImage: model.symbol)
+                    .font(.system(size: 13, weight: .semibold))
+            } else {
             Text(model.title)
                 .font(.system(size: 13, weight: .semibold))
             HStack(spacing: 8) {
@@ -99,6 +112,7 @@ struct HUDView: View {
                     .foregroundStyle(armed ? Color.accentColor : Color.primary)
                     .scaleEffect(armed ? 1.15 : 1)
                     .animation(.spring(response: 0.3, dampingFraction: 0.6), value: armed)
+            }
             }
         }
         .padding(.horizontal, 16)

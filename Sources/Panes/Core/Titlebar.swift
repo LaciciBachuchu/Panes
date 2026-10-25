@@ -9,6 +9,8 @@ import ApplicationServices
 enum Titlebar {
     /// Height of a plain macOS title bar when nothing better can be measured.
     static let standardHeight: CGFloat = 28
+    /// How far down a web-drawn top bar is treated as a title bar.
+    static let webTitlebarBand: CGFloat = 56
 
     /// Height of the window's top chrome: the title bar, or the title bar plus a
     /// unified toolbar when the app has one.
@@ -91,10 +93,20 @@ enum Titlebar {
         guard let w = win ?? AXWindow.window(containing: el) else { return nil }
         guard w.pid != ProcessInfo.processInfo.processIdentifier, w.isStandard,
               !w.isFullScreen, let f = w.frame else { return nil }
-        let bar = height(of: w)
+        var bar = height(of: w)
+        // Apps that draw their top bar in web content (NetEase Music, many Electron
+        // apps) report the whole window as one scroll/web area. Their custom title bars
+        // run a little taller than a native one; accept the top band there unless the
+        // pointer is on a control or a tab.
+        let webHosted = chain.last.map { isScrollableContent($0.0) } ?? false
+        if webHosted { bar = max(bar, Self.webTitlebarBand) }
         guard p.y >= f.minY, p.y <= f.minY + bar else { return nil }
         if !allowControls, chain.contains(where: { isControl($0.0) }) { return nil }
-        if chain.contains(where: { isScrollableContent($0.0) }) { return nil }
+        if webHosted {
+            if chain.contains(where: { usesHorizontalSwipes($0.0, subrole: $0.1) && $0.0 != "AXScrollBar" }) && !allowControls { return nil }
+        } else if chain.contains(where: { isScrollableContent($0.0) }) {
+            return nil
+        }
         return Hit(window: w, frame: f, barHeight: bar, element: el, chain: chain)
     }
 

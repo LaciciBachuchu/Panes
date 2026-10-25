@@ -52,7 +52,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 if AXIsProcessTrusted() {
                     RollUpController.shared.applySettings()
                     TitlebarGestures.shared.applySettings()
-                    PinController.shared.applySettings()
                 }
                 self?.updateStatusItem()
             }
@@ -78,6 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         PaletteController.shared.start()
         LayoutManager.shared.start()
         RollUpController.shared.start()
+        // Glance shows a picture of the window; macOS only lets the user grant that.
+        if Settings.shared.data.glanceEnabled && !WindowCapture.hasPermission { WindowCapture.requestPermission() }
         TitlebarGestures.shared.applySettings()
     }
 
@@ -99,53 +100,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     // Built lazily so it always reflects current settings and the frontmost window.
+    /// Debug aid: the status menu as indented text.
+    func dumpMenu() -> String {
+        let m = NSMenu()
+        menuNeedsUpdate(m)
+        func walk(_ m: NSMenu, _ depth: Int) -> [String] {
+            m.items.flatMap { i -> [String] in
+                let line = String(repeating: "  ", count: depth) + (i.isSeparatorItem ? "----" : i.title)
+                return [line] + (i.submenu.map { walk($0, depth + 1) } ?? [])
+            }
+        }
+        return walk(m, 0).joined(separator: "\n")
+    }
+
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         if !AXIsProcessTrusted() {
-            menu.addItem(withTitle: "Grant Accessibility Access…", action: #selector(showOnboarding), keyEquivalent: "").target = self
+            menu.addItem(withTitle: "授予辅助功能权限…", action: #selector(showOnboarding), keyEquivalent: "").target = self
             menu.addItem(.separator())
         }
         let s = Settings.shared.data
-        for a in s.actions where a.inMenu {
-            let item = NSMenuItem(title: a.name, action: #selector(runAction(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = a
-            item.image = NSImage(systemSymbolName: a.symbol, accessibilityDescription: nil)
-            if let sc = a.shortcut { applyShortcut(sc, to: item) }
-            menu.addItem(item)
+        // Every placement lives in one grouped submenu; the top level stays short.
+        let arrange = NSMenuItem(title: "摆放当前窗口", action: nil, keyEquivalent: "")
+        arrange.image = NSImage(systemSymbolName: "rectangle.split.2x2", accessibilityDescription: nil)
+        let arrangeMenu = NSMenu()
+        let groups = Dictionary(grouping: s.actions.filter { $0.inMenu && $0.kind != .rollUp }, by: MenuGroup.of)
+        for g in MenuGroup.allCases {
+            guard let items = groups[g], !items.isEmpty else { continue }
+            if arrangeMenu.numberOfItems > 0 { arrangeMenu.addItem(.separator()) }
+            arrangeMenu.addItem(NSMenuItem.sectionHeader(title: g.title))
+            for a in items { arrangeMenu.addItem(actionItem(a)) }
         }
-
-        if s.magicTilingEnabled {
-            menu.addItem(.separator())
-            let undo = MagicTiling.shared.canUndo
-            let item = NSMenuItem(title: undo ? "撤销魔法平铺" : "魔法平铺", action: #selector(magicTiling), keyEquivalent: "")
-            item.target = self
-            item.image = NSImage(systemSymbolName: undo ? "arrow.uturn.backward" : "rectangle.3.group", accessibilityDescription: nil)
-            if let sc = s.actions.first(where: { $0.kind == .magicTiling })?.shortcut { applyShortcut(sc, to: item) }
-            menu.addItem(item)
-        }
-
-        let pinned = PinController.shared.menuEntries
-        if !pinned.isEmpty {
-            menu.addItem(.separator())
-            let item = NSMenuItem(title: "置顶的窗口（\(pinned.count)）", action: nil, keyEquivalent: "")
-            let sub = NSMenu()
-            for e in pinned {
-                let i = NSMenuItem(title: e.label, action: #selector(unpinWindow(_:)), keyEquivalent: "")
-                i.target = self
-                i.representedObject = NSNumber(value: e.id)
-                i.toolTip = "取消置顶"
-                i.image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: nil)
-                sub.addItem(i)
-            }
-            sub.addItem(.separator())
-            sub.addItem(withTitle: "全部取消置顶", action: #selector(unpinAll), keyEquivalent: "").target = self
-            item.submenu = sub
+        arrange.submenu = arrangeMenu
+        menu.addItem(arrange)
+        if s.rollUpEnabled, let roll = s.actions.first(where: { $0.kind == .rollUp }) {
+            let item = actionItem(roll)
+            item.title = "卷起 / 展开当前窗口"
             menu.addItem(item)
         }
 
         menu.addItem(.separator())
-        let layouts = NSMenuItem(title: "Layouts", action: nil, keyEquivalent: "")
+        let layouts = NSMenuItem(title: "布局", action: nil, keyEquivalent: "")
         let sub = NSMenu()
         for l in s.layouts {
             let item = NSMenuItem(title: l.name, action: #selector(restoreLayout(_:)), keyEquivalent: "")
@@ -155,13 +150,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             sub.addItem(item)
         }
         if !s.layouts.isEmpty { sub.addItem(.separator()) }
-        sub.addItem(withTitle: "Save Current Layout…", action: #selector(saveLayout), keyEquivalent: "").target = self
+        sub.addItem(withTitle: "保存当前布局…", action: #selector(saveLayout), keyEquivalent: "").target = self
         layouts.submenu = sub
         menu.addItem(layouts)
 
         if let app = NSWorkspace.shared.frontmostApplication, let bid = app.bundleIdentifier, bid != Bundle.main.bundleIdentifier {
             let excluded = Settings.shared.isExcluded(bid)
-            let item = NSMenuItem(title: excluded ? "Re-enable for \(app.localizedName ?? bid)" : "Ignore \(app.localizedName ?? bid)",
+            let item = NSMenuItem(title: excluded ? "恢复处理“\(app.localizedName ?? bid)”" : "忽略“\(app.localizedName ?? bid)”",
                                   action: #selector(toggleExclude(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = bid
@@ -169,12 +164,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
 
         menu.addItem(.separator())
-        let snap = NSMenuItem(title: "Drag to Snap", action: #selector(toggleSnap), keyEquivalent: "")
+        let snap = NSMenuItem(title: "拖拽吸附", action: #selector(toggleSnap), keyEquivalent: "")
         snap.target = self
         snap.state = s.snapEnabled ? .on : .off
         menu.addItem(snap)
-        menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",").target = self
-        menu.addItem(withTitle: "Quit Panes", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(withTitle: "设置…", action: #selector(openSettings), keyEquivalent: ",").target = self
+        menu.addItem(withTitle: "退出 Panes", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    }
+
+    private func actionItem(_ a: WindowAction) -> NSMenuItem {
+        let item = NSMenuItem(title: a.name, action: #selector(runAction(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = a
+        item.image = NSImage(systemSymbolName: a.symbol, accessibilityDescription: nil)
+        if let sc = a.shortcut { applyShortcut(sc, to: item) }
+        return item
     }
 
     private func applyShortcut(_ sc: Shortcut, to item: NSMenuItem) {
@@ -242,18 +246,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         } else {
             Settings.shared.data.excludedBundleIDs.append(bid)
         }
-    }
-
-    @objc private func unpinWindow(_ sender: NSMenuItem) {
-        guard let n = sender.representedObject as? NSNumber else { return }
-        PinController.shared.unpin(CGWindowID(n.uint32Value))
-    }
-
-    @objc private func unpinAll() { PinController.shared.unpinAll() }
-
-    @objc private func magicTiling() {
-        // Let the menu close and focus return to the previous app first.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MagicTiling.shared.toggle() }
     }
 
     @objc private func toggleSnap() { Settings.shared.data.snapEnabled.toggle() }
@@ -329,5 +321,28 @@ enum LoginItem {
         } catch {
             NSLog("Panes: login item change failed: \(error)")
         }
+    }
+}
+
+/// Sections of the "摆放当前窗口" submenu.
+private enum MenuGroup: CaseIterable {
+    case halves, corners, thirds, other
+
+    var title: String {
+        switch self {
+        case .halves: return "半屏"
+        case .corners: return "四角"
+        case .thirds: return "三分之一"
+        case .other: return "其他"
+        }
+    }
+
+    static func of(_ a: WindowAction) -> MenuGroup {
+        guard a.kind == .unitRect, let r = a.rects.first else { return .other }
+        func near(_ v: Double, _ t: Double) -> Bool { abs(v - t) < 0.02 }
+        if (near(r.w, 0.5) && near(r.h, 1)) || (near(r.w, 1) && near(r.h, 0.5)) { return .halves }
+        if near(r.w, 0.5) && near(r.h, 0.5) { return .corners }
+        if near(r.w, 1.0 / 3) || near(r.w, 2.0 / 3) { return .thirds }
+        return .other
     }
 }

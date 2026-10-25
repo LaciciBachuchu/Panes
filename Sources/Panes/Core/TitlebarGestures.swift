@@ -120,8 +120,7 @@ final class TitlebarGestures {
         ignoringGesture = true
         let p = Geometry.mouseAX
         guard Titlebar.mayBeTitlebar(p), let hit = Titlebar.hit(at: p, allowControls: true),
-              !Settings.shared.isExcluded(hit.window.bundleID),
-              !RollUpController.shared.isRolled(hit.window) else { return }
+              !Settings.shared.isExcluded(hit.window.bundleID) else { return }
         // Buttons and pop-ups in the title bar keep vertical meaning only through us;
         // horizontal swipes there belong to the app.
         let owned = hit.chain.contains { Titlebar.usesHorizontalSwipes($0.role, subrole: $0.subrole) }
@@ -167,6 +166,7 @@ final class TitlebarGestures {
             let travel = (dir == .right ? t.dx : -t.dx) + extra
             if travel >= Self.armed, t.armedAt == nil { t.armedAt = CGPoint(x: t.dx, y: t.dy) }
             if travel < Self.armed * 0.8 { t.armedAt = nil }
+            if RollUpController.shared.isRolled(t.window) { return nil }
             let side: Side = dir == .left ? .left : .right
             // Turning after an armed side swipe: corner on that side.
             if let a = t.armedAt {
@@ -192,7 +192,7 @@ final class TitlebarGestures {
             guard travel >= Self.decide else { return nil }
             let key = dir == .down ? "down" : "up"
             if t.cache[key] == nil {
-                t.cache[key] = dir == .down ? WindowManager.shared.fill(t.window) : upPlacement(t.window)
+                t.cache[key] = dir == .down ? downPlacement(t.window) : upPlacement(t.window)
                 track = t
             }
             guard let p = t.cache[key] else { return nil }
@@ -202,8 +202,15 @@ final class TitlebarGestures {
         }
     }
 
+    /// Down on a rolled-up window unrolls it; otherwise down fills.
+    private func downPlacement(_ w: AXWindow) -> Placement? {
+        if RollUpController.shared.isRolled(w) { return Placement(kind: .unroll, title: "展开") }
+        return WindowManager.shared.fill(w)
+    }
+
     /// Up: undo a gesture fill first, else roll up (when roll-up is on).
     private func upPlacement(_ w: AXWindow) -> Placement? {
+        if RollUpController.shared.isRolled(w) { return nil }
         if GesturePlacements.shared.gestureFilled(w) { return Placement(kind: .unfill, title: "还原") }
         guard settings.rollUpEnabled else { return nil }
         return Placement(kind: .rollUp, title: "卷起")
@@ -261,7 +268,7 @@ final class TitlebarGestures {
             let p = Geometry.mouseAX
             var w = Wheel(window: nil, frame: .zero, bar: 0, anchor: p, dir: dir, count: notches, last: now, owned: false)
             if Titlebar.mayBeTitlebar(p), let hit = Titlebar.hit(at: p, allowControls: true),
-               !Settings.shared.isExcluded(hit.window.bundleID), !RollUpController.shared.isRolled(hit.window) {
+               !Settings.shared.isExcluded(hit.window.bundleID) {
                 w.window = hit.window; w.frame = hit.frame; w.bar = hit.barHeight
                 w.owned = hit.chain.contains { Titlebar.usesHorizontalSwipes($0.role, subrole: $0.subrole) }
             }
@@ -283,9 +290,12 @@ final class TitlebarGestures {
         let symbol: String
         switch w.dir {
         case .up: p = upPlacement(win); symbol = "rectangle.topthird.inset.filled"
-        case .down: p = WindowManager.shared.fill(win); symbol = "rectangle.inset.filled"
-        case .left: p = WindowManager.shared.ladder(win, side: .left); symbol = "rectangle.lefthalf.inset.filled"
-        case .right: p = WindowManager.shared.ladder(win, side: .right); symbol = "rectangle.righthalf.inset.filled"
+        case .down: p = downPlacement(win); symbol = "rectangle.inset.filled"
+        case .left, .right:
+            if RollUpController.shared.isRolled(win) { return }
+            let side: Side = w.dir == .left ? .left : .right
+            p = WindowManager.shared.ladder(win, side: side)
+            symbol = side == .left ? "rectangle.lefthalf.inset.filled" : "rectangle.righthalf.inset.filled"
         }
         guard let p else { return }
         GestureHUD.shared.update(title: p.title, symbol: symbol, progress: CGFloat(min(w.count, 3)) / 3, reversed: w.dir == .left,

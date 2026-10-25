@@ -24,6 +24,7 @@ enum UIRenderer {
         model.keyboardHint = true
         write(AnyView(PaletteView(model: model)), size: nil, to: "\(dir)/palette.png")
         write(AnyView(OnboardingView()), size: nil, to: "\(dir)/onboarding.png")
+        try? AppDelegate().dumpMenu().write(toFile: "\(dir)/menu.txt", atomically: true, encoding: .utf8)
         for (name, title, symbol, progress, reversed) in [("hud-left", "左 ⅔", "rectangle.lefthalf.inset.filled", 0.6, true),
                                                           ("hud-armed", "铺满", "rectangle.inset.filled", 1.0, false)] {
             let m = HUDModel(); m.title = title; m.symbol = symbol; m.progress = progress; m.reversed = reversed

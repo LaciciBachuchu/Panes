@@ -1,12 +1,11 @@
-// Roll up ("卷起"): a window collapses to a strip as tall as its title bar.
-// macOS can't draw another app's window as just its title bar, so the real window
-// is put away and Panes draws the strip. Approach adapted from WindowShade
-// (MIT, https://github.com/surfine/WindowShade):
-//   prototype/App/FoldTransaction.swift — try put-away methods in order (off screen →
-//     hide the app → minimize), verify each with the window server, roll back on failure,
-//     hand focus to another window on this Space before hiding a frontmost app;
-//   prototype/Recovery/Journal.swift — a durable journal so a crash never strands windows;
-//   prototype/App/EventTapCallback.swift — an active tap that only asks about double-clicks.
+// Roll up ("卷起"): the window itself shrinks to the height of its title bar and
+// stays where it is, like the classic Mac OS window shade. Nothing is hidden,
+// parked off screen or minimized — dragging the strip drags the real window, and
+// unrolling gives it back its height wherever it now sits.
+// Pieces adapted from WindowShade (MIT, https://github.com/surfine/WindowShade):
+// prototype/Recovery/Journal.swift (a durable journal so a crash never strands a
+// window rolled up) and prototype/App/EventTapCallback.swift (an active tap that only
+// asks about double-clicks).
 
 import AppKit
 import ApplicationServices
@@ -14,31 +13,29 @@ import ApplicationServices
 final class RollUpController {
     static let shared = RollUpController()
 
-    enum HideMethod: String, Codable { case offscreen, hiddenApp, minimized }
-
     final class Rolled {
         let id: CGWindowID
         let window: AXWindow
         let pid: pid_t
         let bundleID: String?
-        let title: String
-        let frame: CGRect          // AX frame before rolling up
+        let fullHeight: CGFloat
         let barHeight: CGFloat
         let snapshot: CGImage?
-        var method: HideMethod
-        var strip: ShadeStrip?
+        let snapshotWidth: CGFloat
 
-        init(id: CGWindowID, window: AXWindow, frame: CGRect, barHeight: CGFloat, snapshot: CGImage?, method: HideMethod) {
-            self.id = id; self.window = window; self.pid = window.pid
-            self.bundleID = window.bundleID; self.title = window.title
-            self.frame = frame; self.barHeight = barHeight; self.snapshot = snapshot; self.method = method
+        init(id: CGWindowID, window: AXWindow, fullHeight: CGFloat, barHeight: CGFloat, snapshot: CGImage?, width: CGFloat) {
+            self.id = id; self.window = window; self.pid = window.pid; self.bundleID = window.bundleID
+            self.fullHeight = fullHeight; self.barHeight = barHeight; self.snapshot = snapshot; self.snapshotWidth = width
         }
     }
 
     private(set) var rolled: [CGWindowID: Rolled] = [:]
-    private var busy: Set<CGWindowID> = []
     private var watchers: [pid_t: AXWatch] = [:]
     private var signalSources: [DispatchSourceSignal] = []
+    /// The tallest a window may stay and still count as rolled up. Many apps have a
+    /// minimum height a bit above the title bar (TextEdit: title + format bar, 82pt);
+    /// apps whose minimum is taller than this can't be rolled up.
+    private static let maxRolledHeight: CGFloat = 120
 
     private var settings: SettingsData { Settings.shared.data }
 
@@ -60,12 +57,12 @@ final class RollUpController {
         let wantTap = settings.rollUpEnabled && settings.rollUpOnDoubleClick
         if wantTap { DoubleClickTap.shared.install() } else { DoubleClickTap.shared.remove() }
         if !settings.rollUpEnabled { unrollAll() }
-        if !settings.glanceEnabled { rolled.values.forEach { $0.strip?.closeGlance(animated: false) } }
+        GlanceController.shared.update()
     }
 
-    /// Put every rolled window back (quit, crash signal, feature switched off).
+    /// Give every rolled window its height back (quit, signal, feature switched off).
     func unrollAll() {
-        for id in Array(rolled.keys) { unroll(id, at: nil, activate: false) }
+        for id in Array(rolled.keys) { unroll(id, activate: false) }
     }
 
     private func installSignalHandlers() {
@@ -83,173 +80,84 @@ final class RollUpController {
 
     // MARK: Entry points
 
-    /// Hotkey: unroll the strip under the pointer, else roll up the focused window.
+    /// Hotkey: unroll the rolled window under the pointer or in focus, else roll up the focused window.
     func toggle(_ target: AXWindow?) {
-        if let r = rolled.values.first(where: { $0.strip?.frame.contains(NSEvent.mouseLocation) == true }) {
-            unroll(r.id, at: r.strip?.axOrigin, activate: true)
+        if let id = GlanceController.shared.rolledWindowUnderPointer() {
+            unroll(id, activate: true)
             return
         }
         guard let w = target ?? AXWindow.focused() else { NSSound.beep(); return }
-        rollUp(w)
+        if let id = w.cgWindowID, rolled[id] != nil {
+            unroll(id, activate: true)
+        } else if !rollUp(w) {
+            NSSound.beep()
+        }
     }
 
     func isRolled(_ w: AXWindow) -> Bool { w.cgWindowID.map { rolled[$0] != nil } ?? false }
 
-    // MARK: Roll up
+    // MARK: Roll up / unroll
 
-    func rollUp(_ w: AXWindow, completion: ((Bool) -> Void)? = nil) {
-        guard settings.rollUpEnabled, let id = w.cgWindowID, rolled[id] == nil, !busy.contains(id),
+    /// Shrinks the window to its title bar. Returns false (and leaves the window as
+    /// it was) when the app won't let it get that short.
+    @discardableResult
+    func rollUp(_ w: AXWindow) -> Bool {
+        guard settings.rollUpEnabled, let id = w.cgWindowID, rolled[id] == nil,
               !Settings.shared.isExcluded(w.bundleID), w.isStandard, !w.isFullScreen, !w.isMinimized,
-              let frame = w.frame else { completion?(false); return }
-        busy.insert(id)
+              w.isResizable, let frame = w.frame else { return false }
         let bar = Titlebar.height(of: w)
         let snapshot = WindowCapture.snapshot(id)
-        let r = Rolled(id: id, window: w, frame: frame, barHeight: bar, snapshot: snapshot, method: .offscreen)
-
-        tryMethods([.offscreen, .hiddenApp, .minimized], for: r) { [weak self] method in
-            guard let self else { return }
-            self.busy.remove(id)
-            guard let method else {
-                Debug.log("rollup: every put-away method failed for \(w.bundleID ?? "?")")
-                NSSound.beep()
-                completion?(false)
-                return
-            }
-            r.method = method
-            self.rolled[id] = r
-            r.strip = ShadeStrip(rolled: r)
-            r.strip?.show()
-            self.watch(r)
-            RollUpJournal.save(Array(self.rolled.values))
-            Debug.log("rollup: \(w.bundleID ?? "?") via \(method)")
-            completion?(true)
+        w.setSize(CGSize(width: frame.width, height: bar))
+        guard let after = w.frame, after.height <= max(bar + 40, Self.maxRolledHeight) else {
+            Debug.log("rollup: \(w.bundleID ?? "?") refuses to get shorter than \(Int(w.frame?.height ?? 0))pt")
+            w.setSize(frame.size)
+            w.setPosition(frame.origin)
+            GestureHUD.shared.flash("这个窗口不能卷起", anchor: CGPoint(x: frame.midX, y: frame.minY + bar))
+            return false
         }
+        // Some apps keep the window's bottom fixed while resizing: put the top back.
+        if abs(after.minY - frame.minY) > 1 { w.setPosition(CGPoint(x: after.minX, y: frame.minY)) }
+        rolled[id] = Rolled(id: id, window: w, fullHeight: frame.height, barHeight: after.height,
+                            snapshot: snapshot, width: frame.width)
+        watch(w.pid)
+        RollUpJournal.save(Array(rolled.values))
+        GlanceController.shared.update(justRolled: id)
+        Debug.log("rollup: \(w.bundleID ?? "?") to \(Int(after.height))pt")
+        return true
     }
 
-    /// Tries each put-away method in turn; a failed attempt is undone before the next.
-    private func tryMethods(_ methods: [HideMethod], for r: Rolled, done: @escaping (HideMethod?) -> Void) {
-        guard let m = methods.first else { done(nil); return }
-        let rest = Array(methods.dropFirst())
-        guard prepare(m, r) else { tryMethods(rest, for: r, done: done); return }
-        perform(m, r)
-        // Give the window server a moment, then believe only what it reports.
-        DispatchQueue.main.asyncAfter(deadline: .now() + (m == .minimized ? 0.45 : 0.12)) { [weak self] in
-            guard let self else { return }
-            if self.isPutAway(r, by: m) {
-                done(m)
-            } else {
-                Debug.log("rollup: \(m) did not take effect, rolling back")
-                self.restore(r, from: m)
-                self.tryMethods(rest, for: r, done: done)
-            }
-        }
-    }
-
-    /// Whether a method may be used at all for this window.
-    private func prepare(_ m: HideMethod, _ r: Rolled) -> Bool {
-        switch m {
-        case .offscreen:
-            return true
-        case .hiddenApp:
-            // Hiding the app hides all its windows: only when this is its only visible one.
-            let visible = AXWindow.windows(of: r.pid).filter { $0.isStandard && !$0.isMinimized }
-            guard visible.count == 1 else { return false }
-            return handOffFocus(from: r.pid)
-        case .minimized:
-            return true
-        }
-    }
-
-    private func perform(_ m: HideMethod, _ r: Rolled) {
-        switch m {
-        case .offscreen:
-            // Far beyond every display; many AppKit windows get pulled back, which the
-            // verification catches.
-            r.window.setPosition(CGPoint(x: -32000, y: -32000))
-        case .hiddenApp:
-            AXUIElementSetAttributeValue(AXUIElementCreateApplication(r.pid), kAXHiddenAttribute as CFString, kCFBooleanTrue)
-        case .minimized:
-            AXUIElementSetAttributeValue(r.window.element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
-        }
-    }
-
-    private func isPutAway(_ r: Rolled, by m: HideMethod) -> Bool {
-        switch m {
-        case .offscreen:
-            guard let sf = AXWindow.serverFrame(of: r.id) else { return false }
-            return !NSScreen.screens.contains { $0.axFrame.intersects(sf) }
-        case .hiddenApp:
-            return NSRunningApplication(processIdentifier: r.pid)?.isHidden ?? false
-        case .minimized:
-            return r.window.isMinimized
-        }
-    }
-
-    private func restore(_ r: Rolled, from m: HideMethod) {
-        switch m {
-        case .offscreen:
-            break
-        case .hiddenApp:
-            AXUIElementSetAttributeValue(AXUIElementCreateApplication(r.pid), kAXHiddenAttribute as CFString, kCFBooleanFalse)
-            NSRunningApplication(processIdentifier: r.pid)?.unhide()
-        case .minimized:
-            AXUIElementSetAttributeValue(r.window.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-        }
-        r.window.setPosition(r.frame.origin)
-    }
-
-    /// Before hiding a frontmost app, give focus to the top window of another app
-    /// on this Space; otherwise macOS picks a successor that may live on another
-    /// Space and jump there. No other window → don't hide the app (minimize instead).
-    private func handOffFocus(from pid: pid_t) -> Bool {
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return true }
-        let me = ProcessInfo.processInfo.processIdentifier
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
-        for info in list {
-            guard (info[kCGWindowLayer as String] as? Int) == 0,
-                  let owner = info[kCGWindowOwnerPID as String] as? pid_t, owner != pid, owner != me,
-                  let app = NSRunningApplication(processIdentifier: owner), app.activationPolicy == .regular else { continue }
-            app.activate()
-            return true
-        }
-        return false
-    }
-
-    // MARK: Unroll
-
-    /// Puts the window back. `origin` is where the strip now sits (AX space).
-    func unroll(_ id: CGWindowID, at origin: CGPoint?, activate: Bool) {
+    /// Gives the window its height back, below wherever its title bar is now.
+    func unroll(_ id: CGWindowID, activate: Bool) {
         guard let r = rolled.removeValue(forKey: id) else { return }
-        r.strip?.dismiss()
-        r.strip = nil
-        restore(r, from: r.method)
-        if let origin, origin != r.frame.origin {
-            r.window.setPosition(origin)
+        GlanceController.shared.close(animated: false)
+        if let f = r.window.frame {
+            // setFrame keeps the window on screen if the full height wouldn't fit below the bar.
+            r.window.setFrame(CGRect(x: f.minX, y: f.minY, width: f.width, height: r.fullHeight))
         }
         if activate { r.window.raise() }
         unwatch(r.pid)
         RollUpJournal.save(Array(rolled.values))
+        GlanceController.shared.update()
     }
 
-    /// The user brought the window back by other means (Dock, ⌘Tab, app quit).
+    /// The user brought the window back by other means (resized it, closed it, quit).
     private func forget(_ id: CGWindowID) {
         guard let r = rolled.removeValue(forKey: id) else { return }
-        r.strip?.dismiss()
         unwatch(r.pid)
         RollUpJournal.save(Array(rolled.values))
+        GlanceController.shared.update()
     }
 
     private func appQuit(_ pid: pid_t) {
         for r in rolled.values where r.pid == pid { forget(r.id) }
     }
 
-    // MARK: Watching the real window
+    // MARK: Watching rolled windows
 
-    private func watch(_ r: Rolled) {
-        guard watchers[r.pid] == nil else { return }
-        let pid = r.pid
+    private func watch(_ pid: pid_t) {
+        guard watchers[pid] == nil else { return }
         watchers[pid] = AXWatch(pid: pid, notifications: [
-            kAXUIElementDestroyedNotification, kAXWindowDeminiaturizedNotification, kAXApplicationShownNotification,
+            kAXUIElementDestroyedNotification, kAXWindowResizedNotification, kAXWindowMovedNotification,
         ]) { [weak self] note in
             self?.windowEvent(pid: pid, note: note)
         }
@@ -261,17 +169,15 @@ final class RollUpController {
     }
 
     private func windowEvent(pid: pid_t, note: String) {
-        for r in rolled.values where r.pid == pid && !busy.contains(r.id) {
+        for r in rolled.values where r.pid == pid {
             switch note {
             case kAXUIElementDestroyedNotification:
-                // Destroyed elements can't be compared reliably; check the window server.
                 if AXWindow.serverFrame(of: r.id) == nil { forget(r.id) }
-            case kAXWindowDeminiaturizedNotification where r.method == .minimized:
-                if !r.window.isMinimized { forget(r.id) }
-            case kAXApplicationShownNotification where r.method == .hiddenApp:
-                if !(NSRunningApplication(processIdentifier: pid)?.isHidden ?? true) { forget(r.id) }
+            case kAXWindowResizedNotification:
+                // Dragged taller by hand: it's no longer rolled up.
+                if let f = r.window.frame, f.height > r.barHeight + 40 { forget(r.id) }
             default:
-                break
+                GlanceController.shared.close(animated: false)    // the strip is being dragged
             }
         }
     }
@@ -306,14 +212,13 @@ final class AXWatch {
 // MARK: - Crash recovery
 
 /// What's rolled up right now, on disk. Rewritten after every change; read at
-/// launch to bring back windows a crash left hidden.
+/// launch to give back the height of windows a crash left rolled up.
 enum RollUpJournal {
     struct Entry: Codable {
         var pid: Int32
         var bundleID: String?
         var windowID: UInt32
-        var method: RollUpController.HideMethod
-        var x: Double, y: Double
+        var height: Double
     }
 
     private static var url: URL {
@@ -323,10 +228,7 @@ enum RollUpJournal {
     }
 
     static func save(_ rolled: [RollUpController.Rolled]) {
-        let entries = rolled.map {
-            Entry(pid: $0.pid, bundleID: $0.bundleID, windowID: $0.id, method: $0.method,
-                  x: $0.frame.minX, y: $0.frame.minY)
-        }
+        let entries = rolled.map { Entry(pid: $0.pid, bundleID: $0.bundleID, windowID: $0.id, height: $0.fullHeight) }
         if entries.isEmpty {
             try? FileManager.default.removeItem(at: url)
         } else if let data = try? JSONEncoder().encode(entries) {
@@ -335,28 +237,19 @@ enum RollUpJournal {
     }
 
     /// Restores whatever the last run left rolled up, then clears the journal.
+    /// Journals from the earlier hide/minimize design don't decode and are dropped.
     static func recover() {
+        defer { try? FileManager.default.removeItem(at: url) }
         guard let data = try? Data(contentsOf: url),
               let entries = try? JSONDecoder().decode([Entry].self, from: data) else { return }
         for e in entries {
             guard let app = NSRunningApplication(processIdentifier: e.pid), !app.isTerminated,
-                  app.bundleIdentifier == e.bundleID else { continue }
-            switch e.method {
-            case .hiddenApp:
-                AXUIElementSetAttributeValue(AXUIElementCreateApplication(e.pid), kAXHiddenAttribute as CFString, kCFBooleanFalse)
-                app.unhide()
-            case .minimized, .offscreen:
-                break
-            }
-            if let w = AXWindow.windows(of: e.pid).first(where: { $0.cgWindowID == e.windowID }) {
-                if e.method == .minimized {
-                    AXUIElementSetAttributeValue(w.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-                }
-                w.setPosition(CGPoint(x: e.x, y: e.y))
-            }
+                  app.bundleIdentifier == e.bundleID,
+                  let w = AXWindow.windows(of: e.pid).first(where: { $0.cgWindowID == e.windowID }),
+                  let f = w.frame else { continue }
+            w.setFrame(CGRect(x: f.minX, y: f.minY, width: f.width, height: e.height))
             Debug.log("rollup: recovered \(e.bundleID ?? "?") from journal")
         }
-        try? FileManager.default.removeItem(at: url)
     }
 }
 
@@ -409,9 +302,18 @@ final class DoubleClickTap {
     /// Main thread: roll up if this double-click landed on a title bar.
     fileprivate static func decide(at p: CGPoint) -> Bool {
         guard Settings.shared.data.rollUpEnabled, Settings.shared.data.rollUpOnDoubleClick,
-              let hit = Titlebar.hit(at: p), !Settings.shared.isExcluded(hit.window.bundleID) else { return false }
-        RollUpController.shared.rollUp(hit.window)
-        return true
+              let hit = Titlebar.hit(at: p), !Settings.shared.isExcluded(hit.window.bundleID) else {
+            Debug.log("doubleclick: not a title bar at \(p) role=\(AXWindow.element(at: p)?.role ?? "nil")")
+            return false
+        }
+        let rc = RollUpController.shared
+        if let id = hit.window.cgWindowID, rc.rolled[id] != nil {
+            rc.unroll(id, activate: true)
+            return true
+        }
+        // Only swallow the click if the window actually rolled up; otherwise the
+        // app (and macOS) keep their own double-click behaviour.
+        return rc.rollUp(hit.window)
     }
 }
 

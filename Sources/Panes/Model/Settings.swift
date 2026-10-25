@@ -44,10 +44,6 @@ struct SettingsData: Codable {
     var scrollWheelGesturesEnabled = true
     var flingEnabled = true
 
-    // Pin and magic tiling
-    var pinEnabled = true
-    var magicTilingEnabled = true
-
     // General
     var excludedBundleIDs: [String] = []
     var showMenuBarIcon = true
@@ -72,7 +68,10 @@ struct SettingsData: Codable {
         d(.excludedBundleIDs, &excludedBundleIDs); d(.showMenuBarIcon, &showMenuBarIcon)
         d(.rollUpEnabled, &rollUpEnabled); d(.rollUpOnDoubleClick, &rollUpOnDoubleClick); d(.glanceEnabled, &glanceEnabled)
         d(.trackpadGesturesEnabled, &trackpadGesturesEnabled); d(.scrollWheelGesturesEnabled, &scrollWheelGesturesEnabled)
-        d(.flingEnabled, &flingEnabled); d(.pinEnabled, &pinEnabled); d(.magicTilingEnabled, &magicTilingEnabled)
+        d(.flingEnabled, &flingEnabled)
+        actions.removeAll { $0.kind.isRemoved }
+        // Default names were English before the menu went Chinese; renamed ones stay.
+        for i in actions.indices { if let zh = Defaults.chineseNames[actions[i].name] { actions[i].name = zh } }
         // Settings saved before a feature existed lack its action: add the default one.
         for a in Defaults.actions where a.kind.isFeatureAction && !actions.contains(where: { $0.kind == a.kind }) {
             actions.append(a)
@@ -107,8 +106,7 @@ final class Settings: ObservableObject {
     func isEnabled(_ kind: ActionKind) -> Bool {
         switch kind {
         case .rollUp: return data.rollUpEnabled
-        case .pin: return data.pinEnabled
-        case .magicTiling: return data.magicTilingEnabled
+        case .pin, .magicTiling: return false
         default: return true
         }
     }
@@ -136,7 +134,22 @@ final class Settings: ObservableObject {
 enum Defaults {
     static let third = 1.0 / 3.0
 
+    static let chineseNames: [String: String] = [
+        "Left Half": "左半屏", "Right Half": "右半屏", "Top Half": "上半屏", "Bottom Half": "下半屏",
+        "Top Left": "左上角", "Top Right": "右上角", "Bottom Left": "左下角", "Bottom Right": "右下角",
+        "Left Third": "左三分之一", "Center Third": "中间三分之一", "Right Third": "右三分之一",
+        "Left Two Thirds": "左三分之二", "Right Two Thirds": "右三分之二",
+        "Maximize": "最大化", "Almost Maximize": "几乎最大化", "Maximize Height": "最大化高度",
+        "Center": "居中", "Restore": "还原", "Larger": "放大", "Smaller": "缩小",
+        "Next Display": "移到下一个显示器", "Previous Display": "移到上一个显示器",
+        "Show Palette": "显示面板", "Roll Up": "卷起",
+    ]
+
     static var actions: [WindowAction] {
+        englishActions.map { a in var a = a; a.name = chineseNames[a.name] ?? a.name; return a }
+    }
+
+    private static var englishActions: [WindowAction] {
         let m = Shortcut.ctrlOpt
         func a(_ name: String, _ rects: [UnitRect], _ key: Int, palette: Bool = false) -> WindowAction {
             WindowAction(name: name, kind: .unitRect, rects: rects, shortcut: Shortcut(key, m), inPalette: palette)
@@ -170,8 +183,6 @@ enum Defaults {
             k("Show Palette", .showPalette, Shortcut(kVK_ANSI_P, m)),
             // ⌃⌥⌘ is held for hover-move, so the newer features live on ⌃⌥⇧.
             k("Roll Up", .rollUp, Shortcut(kVK_ANSI_C, Shortcut.ctrlOptShift)),
-            k("Pin on Top", .pin, Shortcut(kVK_ANSI_P, Shortcut.ctrlOptShift)),
-            k("Magic Tiling", .magicTiling, Shortcut(kVK_ANSI_T, Shortcut.ctrlOptShift)),
         ]
     }
 

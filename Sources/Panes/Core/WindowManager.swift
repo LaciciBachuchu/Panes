@@ -24,11 +24,7 @@ final class WindowManager {
         case .rollUp:
             RollUpController.shared.toggle(target)
             return
-        case .pin:
-            PinController.shared.toggle(target)
-            return
-        case .magicTiling:
-            MagicTiling.shared.toggle()
+        case .pin, .magicTiling:
             return
         default:
             break

@@ -23,7 +23,7 @@ final class WindowGlide {
     }
 
     /// Glides `w` from its current frame to `to`. Main thread.
-    static func glide(_ w: AXWindow, to: CGRect, duration: TimeInterval = 0.22, completion: (() -> Void)? = nil) {
+    static func glide(_ w: AXWindow, to: CGRect, duration: TimeInterval = 0.28, completion: (() -> Void)? = nil) {
         guard let from = w.frame else { w.setFrame(to); completion?(); return }
         let id = w.cgWindowID
         if let id { active[id]?.cancel() }
@@ -50,15 +50,24 @@ final class WindowGlide {
             func timed(_ body: () -> Void) -> TimeInterval {
                 let t = Date(); body(); return Date().timeIntervalSince(t)
             }
+            var frames: [TimeInterval] = []
+            defer {
+                let ms = frames.map { Int($0 * 1000) }
+                Debug.log("glide: \(frames.count) frames in \(Int(Date().timeIntervalSince(start) * 1000))ms, per-call ms \(ms)")
+            }
             // Resize once, at the start; from then on only the (cheap) position moves.
             var gaveUp = timed { window.setSize(to.size) } > 0.08
             while !gaveUp && !isCancelled {
                 let t = min(1, Date().timeIntervalSince(start) / duration)
                 let e = 1 - pow(1 - t, 3)    // ease-out cubic: leaves at fling speed, settles gently
                 let p = CGPoint(x: from.minX + (to.minX - from.minX) * e, y: from.minY + (to.minY - from.minY) * e)
-                if timed({ window.setPosition(p) }) > 0.08 { gaveUp = true }
+                let spent = timed({ window.setPosition(p) })
+                frames.append(spent)
+                if spent > 0.08 { gaveUp = true }
                 if t >= 1 { break }
-                usleep(8_000)                // ~120 fps
+                // Leave the app a breather between moves so it can draw; flooding it
+                // makes every reply slower.
+                usleep(8_000)
             }
             if !isCancelled { window.setFrame(to) }   // calibrate: size + position, twice inside
             DispatchQueue.main.async(execute: completion)
@@ -102,7 +111,7 @@ final class GesturePlacements {
 
 /// Where a gesture or fling sends a window, and the words for it.
 struct Placement {
-    enum Kind { case rollUp, unfill, frame, undo }
+    enum Kind { case rollUp, unroll, unfill, frame, undo }
     var kind: Kind
     var frame: CGRect?
     var title: String
@@ -179,6 +188,8 @@ extension WindowManager {
         switch p.kind {
         case .rollUp:
             RollUpController.shared.rollUp(w)
+        case .unroll:
+            if let id = w.cgWindowID { RollUpController.shared.unroll(id, activate: true) }
         case .unfill, .undo:
             guard let back = GesturePlacements.shared.undo(w) else { NSSound.beep(); return }
             if animated { WindowGlide.glide(w, to: back) } else { w.setFrame(back) }
