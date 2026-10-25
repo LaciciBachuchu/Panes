@@ -4,6 +4,11 @@ import AppKit
 final class PreviewOverlay {
     static let shared = PreviewOverlay()
 
+    /// Snap previews are accent-tinted; other drop targets look different so you can
+    /// tell before letting go which one you'll get.
+    enum Style { case snap, slideOver }
+    private let label = NSTextField(labelWithString: "")
+
     private let panel: NSPanel
     private let box = NSVisualEffectView()
     private let tint = NSView()
@@ -34,10 +39,27 @@ final class PreviewOverlay {
         tint.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
         tint.autoresizingMask = [.width, .height]
         box.addSubview(tint)
+        label.font = .systemFont(ofSize: 20, weight: .semibold)
+        label.textColor = .white
+        label.alignment = .center
+        label.wantsLayer = true
+        label.shadow = { let s = NSShadow(); s.shadowBlurRadius = 6; s.shadowColor = .black.withAlphaComponent(0.5); return s }()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: box.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: box.centerYAnchor),
+        ])
         panel.contentView = box
     }
 
-    func show(axFrame: CGRect) {
+    func show(axFrame: CGRect, label text: String? = nil, style: Style = .snap) {
+        label.stringValue = text ?? ""
+        label.isHidden = text == nil
+        let color: NSColor = style == .slideOver ? .systemPurple : .controlAccentColor
+        tint.layer?.backgroundColor = color.withAlphaComponent(style == .slideOver ? 0.28 : 0.18).cgColor
+        box.layer?.borderColor = color.withAlphaComponent(0.9).cgColor
+        box.layer?.borderWidth = style == .slideOver ? 3 : 2
         if let c = currentAX, c == axFrame, isVisible { return }
         currentAX = axFrame
         let target = Geometry.cocoaRect(fromAX: axFrame).insetBy(dx: 2, dy: 2)

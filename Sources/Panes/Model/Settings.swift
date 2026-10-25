@@ -42,6 +42,10 @@ struct SettingsData: Codable {
     // Carry to every Space
     var carryEnabled = true
 
+    // Slide Over (experimental: off until the float-in-front hand-off works)
+    var slideOverEnabled = false
+    var slideOverDwell: Double = 0.5
+
     // General
     var excludedBundleIDs: [String] = []
     var showMenuBarIcon = true
@@ -66,6 +70,7 @@ struct SettingsData: Codable {
         d(.excludedBundleIDs, &excludedBundleIDs); d(.showMenuBarIcon, &showMenuBarIcon)
         d(.trackpadGesturesEnabled, &trackpadGesturesEnabled); d(.scrollWheelGesturesEnabled, &scrollWheelGesturesEnabled)
         d(.flingEnabled, &flingEnabled); d(.carryEnabled, &carryEnabled)
+        d(.slideOverEnabled, &slideOverEnabled); d(.slideOverDwell, &slideOverDwell)
         actions.removeAll { $0.kind.isRemoved }
         // Default names were English before the menu went Chinese; renamed ones stay.
         for i in actions.indices { if let zh = Defaults.chineseNames[actions[i].name] { actions[i].name = zh } }
@@ -104,6 +109,7 @@ final class Settings: ObservableObject {
         switch kind {
         case .rollUp, .pin, .magicTiling: return false
         case .carry: return data.carryEnabled
+        case .slideOver: return data.slideOverEnabled
         default: return true
         }
     }
@@ -139,7 +145,7 @@ enum Defaults {
         "Maximize": "最大化", "Almost Maximize": "几乎最大化", "Maximize Height": "最大化高度",
         "Center": "居中", "Restore": "还原", "Larger": "放大", "Smaller": "缩小",
         "Next Display": "移到下一个显示器", "Previous Display": "移到上一个显示器",
-        "Show Palette": "显示面板", "Roll Up": "卷起", "Carry to Every Space": "带到每张桌面",
+        "Show Palette": "显示面板", "Roll Up": "卷起", "Carry to Every Space": "带到每张桌面", "Slide Over": "侧拉",
     ]
 
     static var actions: [WindowAction] {
@@ -180,6 +186,7 @@ enum Defaults {
             k("Show Palette", .showPalette, Shortcut(kVK_ANSI_P, m)),
             // ⌃⌥⌘ is held for hover-move, so newer features live on ⌃⌥⇧.
             k("Carry to Every Space", .carry, Shortcut(kVK_ANSI_G, Shortcut.ctrlOptShift)),
+            k("Slide Over", .slideOver, Shortcut(kVK_ANSI_S, Shortcut.ctrlOptShift)),
         ]
     }
 

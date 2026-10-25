@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 if AXIsProcessTrusted() {
                     TitlebarGestures.shared.applySettings()
                     CarryController.shared.applySettings()
+                    SlideOverController.shared.applySettings()
                 }
                 self?.updateStatusItem()
             }

@@ -1,7 +1,14 @@
 import AppKit
 
-/// Watches mouse drags; when a window is dragged to a screen edge or corner,
-/// shows a preview and snaps the window there on release.
+/// Watches title-bar drags and is the one place that decides what letting go does.
+/// While dragging it shows a preview of the outcome; on release exactly one of
+/// these happens, in this order:
+///   1. a dwell target was reached (rest at the middle of the left/right edge →
+///      slide over),
+///   2. the slide-over window was dropped on / thrown at its own edge → tuck it away,
+///   3. the pointer is in a snap area → snap,
+///   4. the window was thrown fast enough → fling,
+///   5. nothing.
 final class SnapController {
     static let shared = SnapController()
 
@@ -13,6 +20,14 @@ final class SnapController {
     private var startFrame: CGRect?
     private var startMouse: CGPoint = .zero
     private var current: (area: SnapArea, screen: NSScreen)?
+
+    /// Places you reach by resting the pointer there for a moment while dragging.
+    enum DwellZone: Equatable { case edgeMiddle(SlideOverController.Side) }
+    private var dwellZone: DwellZone?
+    private var dwellReached = false
+    private var dwellWork: DispatchWorkItem?
+    private var lastPoint: CGPoint = .zero
+    private var lastFlags: NSEvent.ModifierFlags = []
     private var windowID: CGWindowID?
     private var pendingSince = Date.distantPast
     /// Set when a drag starts inside a trigger band (e.g. a window right under the
@@ -105,30 +120,99 @@ final class SnapController {
             let now = ProcessInfo.processInfo.systemUptime
             samples.append((now, p))
             samples.removeAll { now - $0.t > 0.08 }
+            lastPoint = p
+            lastFlags = e.modifierFlags
+            updateDwell(at: p)
             updatePreview(at: p, flags: e.modifierFlags)
         }
     }
 
+    private enum Drop {
+        case slideOver(SlideOverController.Side, NSScreen)
+        case stash
+        case snap(SnapArea, NSScreen)
+        case fling(CGVector)
+        case none
+    }
+
+    /// The single decision for a released title-bar drag.
+    private func resolveDrop(_ w: AXWindow) -> Drop {
+        let p = Geometry.mouseAX
+        let bypass = settings.disableSnapModifier.matches(NSEvent.modifierFlags)
+        if !bypass, dwellReached, case .edgeMiddle(let side)? = dwellZone, let screen = NSScreen.screen(containingAX: p) {
+            return .slideOver(side, screen)
+        }
+        let v = releaseVelocity(minimum: 0)
+        if SlideOverController.shared.shouldStash(w, pointer: p, velocity: v) { return .stash }
+        if let hit = current { return .snap(hit.area, hit.screen) }
+        if settings.flingEnabled, !bypass, let v = releaseVelocity() { return .fling(v) }
+        return .none
+    }
+
     private func mouseUp() {
         defer { reset() }
-        Debug.log("snap: mouseUp state=\(state) area=\(current?.area.summary ?? "nil")")
         guard state == .moving, let w = window else { return }
-        // Released in a snap area → snap. Otherwise a fast enough throw → fling.
-        guard let hit = current else {
-            if settings.flingEnabled, !settings.disableSnapModifier.matches(NSEvent.modifierFlags),
-               let v = releaseVelocity() {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { Self.fling(w, velocity: v) }
-            }
-            return
-        }
+        let drop = resolveDrop(w)
+        Debug.log("snap: mouseUp → \(drop)")
+        let slide = SlideOverController.shared
         // Let the app finish its own drag before we reposition.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
-            WindowManager.shared.place(w, unit: hit.area.target, on: hit.screen)
+            switch drop {
+            case .slideOver(let side, let screen):
+                slide.dock(w, side: side, screen: screen)
+            case .stash:
+                slide.stash()
+            case .snap(let area, let screen):
+                if slide.isDocked(w) { slide.release(restore: false) }
+                WindowManager.shared.place(w, unit: area.target, on: screen)
+            case .fling(let v):
+                if slide.isDocked(w) { slide.release(restore: false) }
+                Self.fling(w, velocity: v)
+            case .none:
+                // Dragged away from its edge: it's an ordinary window again.
+                if slide.isDocked(w) { slide.release(restore: false) }
+            }
         }
+    }
+
+    // MARK: Dwell
+
+    /// The dwell zone under the pointer: the middle third of the left or right edge.
+    private func dwellZone(at p: CGPoint) -> DwellZone? {
+        guard settings.slideOverEnabled, let screen = NSScreen.screen(containingAX: p) else { return nil }
+        let f = screen.axFrame, vf = screen.axVisibleFrame
+        let t = CGFloat(settings.snapThreshold)
+        let tl = max(t, vf.minX - f.minX + t), tr = max(t, f.maxX - vf.maxX + t)
+        let rel = (p.y - f.minY) / f.height
+        guard rel > 0.3, rel < 0.7 else { return nil }
+        if p.x - f.minX <= tl { return .edgeMiddle(.left) }
+        if f.maxX - 1 - p.x <= tr { return .edgeMiddle(.right) }
+        return nil
+    }
+
+    /// Starts the dwell timer when the pointer enters a zone; the pointer often
+    /// rests without any drag events, so the timer re-evaluates the preview itself.
+    private func updateDwell(at p: CGPoint) {
+        let zone = dwellZone(at: p)
+        guard zone != dwellZone else { return }
+        dwellZone = zone
+        dwellReached = false
+        dwellWork?.cancel()
+        guard zone != nil else { return }
+        let w = DispatchWorkItem { [weak self] in
+            guard let self, self.state == .moving, self.dwellZone == zone else { return }
+            self.dwellReached = true
+            self.updatePreview(at: self.lastPoint, flags: self.lastFlags)
+        }
+        dwellWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + settings.slideOverDwell, execute: w)
     }
 
     private func reset() {
         state = .idle
+        dwellWork?.cancel()
+        dwellZone = nil
+        dwellReached = false
         samples.removeAll()
         suppressUntilLeave = false
         window = nil
@@ -150,6 +234,14 @@ final class SnapController {
     }
 
     private func updatePreview(at p: CGPoint, flags: NSEvent.ModifierFlags) {
+        // A reached dwell target shows its own, differently labelled preview.
+        if dwellReached, case .edgeMiddle(let side)? = dwellZone, !settings.disableSnapModifier.matches(flags),
+           let screen = NSScreen.screen(containingAX: p), let size = window?.frame?.size {
+            current = nil
+            PreviewOverlay.shared.show(axFrame: SlideOverController.dockFrame(for: size, side: side, screen: screen),
+                                       label: "侧拉", style: .slideOver)
+            return
+        }
         guard settings.snapEnabled, !settings.disableSnapModifier.matches(flags),
               let screen = NSScreen.screen(containingAX: p), let area = Self.area(at: p, on: screen, settings: settings) else {
             suppressUntilLeave = false
@@ -159,25 +251,23 @@ final class SnapController {
         }
         if suppressUntilLeave { return }
         current = (area, screen)
-        PreviewOverlay.shared.show(axFrame: WindowManager.shared.targetFrame(unit: area.target, screen: screen))
+        PreviewOverlay.shared.show(axFrame: WindowManager.shared.targetFrame(unit: area.target, screen: screen), label: nil, style: .snap)
     }
 
     // MARK: Fling
 
     /// Pointer velocity (pt/s, AX space) over the last 50ms, if it was a throw.
-    private func releaseVelocity() -> CGVector? {
+    private func releaseVelocity(minimum: CGFloat = SnapController.flingSpeed) -> CGVector? {
         let now = ProcessInfo.processInfo.systemUptime
         let recent = samples.filter { now - $0.t <= 0.05 }
         guard let first = recent.first, let last = recent.last, last.t - first.t > 0.008 else { return nil }
         let dt = CGFloat(last.t - first.t)
         let v = CGVector(dx: (last.p.x - first.p.x) / dt, dy: (last.p.y - first.p.y) / dt)
-        return hypot(v.dx, v.dy) >= Self.flingSpeed ? v : nil
+        return hypot(v.dx, v.dy) >= minimum ? v : nil
     }
 
     private static let flingSpeed: CGFloat = 1500
 
-    /// Up = roll up (a gesture fill is undone first), down = fill, sideways = half,
-    /// diagonal = that corner. The window glides there.
     /// Debug builds of the behaviour only (PanesDebug on): replay a fling on the
     /// focused window from `dx,dy` in a distributed notification, so the direction
     /// mapping and glide can be checked without a real hand on a mouse.
@@ -191,6 +281,8 @@ final class SnapController {
         }
     }
 
+    /// Up = undo a gesture fill, down = fill, sideways = half, diagonal = that corner.
+    /// The window glides there.
     private static func fling(_ w: AXWindow, velocity v: CGVector) {
         let angle = atan2(-v.dy, v.dx) * 180 / .pi      // 0 = right, 90 = up (AX y grows down)
         let wm = WindowManager.shared

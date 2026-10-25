@@ -10,6 +10,7 @@ struct FeaturesTab: View {
         Form {
             gestureSection
             carrySection
+            slideOverSection
         }
         .formStyle(.grouped)
         .onAppear { canCapture = WindowCapture.hasPermission }
@@ -32,6 +33,29 @@ struct FeaturesTab: View {
                 Text("浏览器标签页、地址栏这类自己会用横向滑动的地方，横向手势留给 App。")
             }
             .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: 侧拉
+
+    private var slideOverSection: some View {
+        Section {
+            Toggle("侧拉（实验，未完成）", isOn: $settings.data.slideOverEnabled)
+            if settings.data.slideOverEnabled {
+                LabeledContent("快捷键") { ShortcutRecorder(shortcut: shortcut(for: .slideOver)) }
+                LabeledContent("在边缘中段停多久进侧拉") {
+                    HStack {
+                        Slider(value: $settings.data.slideOverDwell, in: 0.2...1.5)
+                        Text(String(format: "%.1f 秒", settings.data.slideOverDwell)).monospacedDigit().frame(width: 50)
+                    }
+                }
+            }
+        } header: {
+            Text("侧拉")
+        } footer: {
+            Text("拖着标题栏到屏幕左边或右边的中段停一下，预览变成紫色、写着“侧拉”时松手，窗口就靠在那一边、浮在其他窗口前面；直接松手照旧是吸附半屏。拖玻璃边框挪位置，拖下面两个角改大小。往屏幕边一甩就收起，边上留一个小把手，点一下或往里拉就回来；把窗口拖离边缘就退出侧拉。同一时间只有一扇侧拉窗口。")
+                .font(.caption).foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
