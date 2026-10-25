@@ -103,6 +103,15 @@ struct AXWindow: Hashable {
         return CGRect(origin: p, size: s)
     }
 
+    /// Frame as the window server sees it. Unlike the AX frame, which the app
+    /// reports and which can lag a live title-bar drag by 100ms or more, this
+    /// tracks the drag in real time.
+    static func serverFrame(of id: CGWindowID) -> CGRect? {
+        guard let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]])?.first,
+              let b = info[kCGWindowBounds as String] as? NSDictionary else { return nil }
+        return CGRect(dictionaryRepresentation: b)
+    }
+
     var title: String { element.attr(kAXTitleAttribute) ?? "" }
     var subrole: String? { element.attr(kAXSubroleAttribute) }
     var isMinimized: Bool { element.attr(kAXMinimizedAttribute) ?? false }

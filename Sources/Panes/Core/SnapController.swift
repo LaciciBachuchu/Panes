@@ -13,7 +13,8 @@ final class SnapController {
     private var startFrame: CGRect?
     private var startMouse: CGPoint = .zero
     private var current: (area: SnapArea, screen: NSScreen)?
-    private var pendingChecks = 0
+    private var windowID: CGWindowID?
+    private var pendingSince = Date.distantPast
     /// Set when a drag starts inside a trigger band (e.g. a window right under the
     /// menu bar): snapping stays off until the cursor has left the band once.
     private var suppressUntilLeave = false
@@ -57,16 +58,20 @@ final class SnapController {
     private func arm() {
         guard let w = AXWindow.at(startMouse), w.pid != ProcessInfo.processInfo.processIdentifier,
               !Settings.shared.isExcluded(w.bundleID), let f = w.frame else {
+            Debug.log("snap: no window at \(startMouse)")
             state = .ignoring
             return
         }
+        windowID = w.cgWindowID
+        let f0 = windowID.flatMap(AXWindow.serverFrame(of:)) ?? f
+        Debug.log("snap: armed \(w.bundleID ?? "?") frame=\(f0) mouse=\(startMouse)")
         // Only drags that start near the top of the window can be title-bar drags.
         // Toolbar-style apps put draggable areas lower, so be generous.
         if startMouse.y - f.minY > 120 { state = .ignoring; return }
         window = w
-        startFrame = f
+        startFrame = f0
         state = .pending
-        pendingChecks = 0
+        pendingSince = Date()
     }
 
     private func mouseDragged(_ e: NSEvent) {
@@ -78,16 +83,18 @@ final class SnapController {
             guard hypot(p.x - startMouse.x, p.y - startMouse.y) > 3 else { return }
             arm()
         case .pending:
-            pendingChecks += 1
-            guard let w = window, let f0 = startFrame, let f = w.frame else { state = .ignoring; return }
-            if f.size != f0.size { state = .ignoring; return }       // a resize, not a move
+            guard let w = window, let f0 = startFrame,
+                  let f = windowID.flatMap(AXWindow.serverFrame(of:)) ?? w.frame else { state = .ignoring; return }
+            if f.size != f0.size { Debug.log("snap: resize, ignoring"); state = .ignoring; return }
             if f.origin != f0.origin {
+                Debug.log("snap: moving after \(Int(Date().timeIntervalSince(pendingSince) * 1000))ms")
                 state = .moving
                 if let screen = NSScreen.screen(containingAX: startMouse) {
                     suppressUntilLeave = Self.area(at: startMouse, on: screen, settings: settings) != nil
                 }
                 beganMoving(w, frame: f, mouse: p)
-            } else if pendingChecks > 25 {
+            } else if Date().timeIntervalSince(pendingSince) > 0.6 {
+                Debug.log("snap: window never moved, ignoring")
                 state = .ignoring                                     // dragging content, not the window
             }
         case .moving:
@@ -97,6 +104,7 @@ final class SnapController {
 
     private func mouseUp() {
         defer { reset() }
+        Debug.log("snap: mouseUp state=\(state) area=\(current?.area.summary ?? "nil")")
         guard state == .moving, let w = window, let hit = current else { return }
         // Let the app finish its own drag before we reposition.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
@@ -108,6 +116,7 @@ final class SnapController {
         state = .idle
         suppressUntilLeave = false
         window = nil
+        windowID = nil
         startFrame = nil
         current = nil
         PreviewOverlay.shared.hide()
