@@ -48,6 +48,14 @@ final class SlideOverController {
         if !settings.slideOverEnabled { release(restore: false) }
     }
 
+    /// Quitting: a tucked-away window must come back on screen, synchronously.
+    func restoreForQuit() {
+        guard let d = docked else { return }
+        docked = nil
+        if d.stashed { d.window.setFrame(d.frame) }
+        ParkedJournal.clear("slideover")
+    }
+
     func isDocked(_ w: AXWindow) -> Bool { w.cgWindowID != nil && w.cgWindowID == docked?.id }
 
     // MARK: Geometry
@@ -89,6 +97,7 @@ final class SlideOverController {
         let target = Self.dockFrame(for: f.size, side: side, screen: screen)
         let d = Docked(id: id, window: w, side: side, original: f, frame: target)
         docked = d
+        ParkedJournal.record("slideover", [(w, f)])
         WindowGlide.glide(w, to: target) { [weak self] in
             guard let self, self.docked === d else { return }
             d.frame = w.frame ?? target
@@ -114,6 +123,7 @@ final class SlideOverController {
         if let o = activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
         activationObserver = nil
         if restore || d.stashed { WindowGlide.glide(d.window, to: d.original) }
+        ParkedJournal.clear("slideover")
     }
 
     // MARK: Stash behind a handle

@@ -59,6 +59,15 @@ final class ScrollStrip {
         debugHook = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("local.thomas.panes.debug.stripOverview"), object: nil, queue: .main
         ) { [weak self] _ in self?.showOverview() }
+        // Debug: a burst of 8 wheel ticks of `delta` points, 30ms apart, like a wheel spin.
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("local.thomas.panes.debug.stripWheel"), object: nil, queue: .main
+        ) { [weak self] note in
+            guard let d = (note.object as? String).flatMap(Double.init) else { return }
+            for i in 0..<8 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03 * Double(i)) { self?.wheel(by: CGFloat(d)) }
+            }
+        }
     }
 
     // MARK: Enter / exit
@@ -77,6 +86,8 @@ final class ScrollStrip {
         screen = s
         area = s.axVisibleFrame
         originals = Dictionary(uniqueKeysWithValues: found.map { ($0.0, $0.2) })
+        // Written before anything moves, so a crash can't strand a window off screen.
+        ParkedJournal.record("strip", found.map { ($0.1, $0.2) })
         // Columns in their current left-to-right order; widths snap to the presets.
         columns = found.sorted { $0.2.minX < $1.2.minX }.map { id, w, f in
             let share = Self.presets.min { abs($0 - f.width / area.width) < abs($1 - f.width / area.width) }!
@@ -87,6 +98,15 @@ final class ScrollStrip {
         applyFrames()
         for c in columns { watch(c.window.pid) }
         installMonitors()
+        refreshSnapshots()
+        let p = ScrollPad(screen: s)
+        p.layout = { [weak self] in self?.padModel() ?? ([], 0, 1) }
+        p.onDrag = { [weak self] dx in self?.padDragged(dx) }
+        p.onRelease = { [weak self] v in self?.padReleased(v) }
+        p.onWheel = { [weak self] d in self?.wheel(by: d) }
+        pad = p
+        p.update(offset: offset)
+        p.orderFrontRegardless()
         Debug.log("strip: \(columns.count) columns, total \(Int(totalWidth))pt")
         GestureHUD.shared.flash("卷轴：\(columns.count) 列", symbol: "rectangle.split.3x1", anchor: CGPoint(x: area.midX, y: area.minY + 40))
     }
@@ -94,6 +114,11 @@ final class ScrollStrip {
     func exit() {
         guard isActive else { return }
         animation?.invalidate()
+        wheelIdle?.cancel()
+        wheelTarget = nil
+        proxy?.close(); proxy = nil
+        pad?.orderOut(nil); pad = nil
+        snapshots = [:]
         closePeek()
         overview?.close(); overview = nil
         for c in columns { if let f = originals[c.id] { c.window.setFrame(f) } }
@@ -101,6 +126,7 @@ final class ScrollStrip {
         originals = [:]
         watchers = [:]
         removeMonitors()
+        ParkedJournal.clear("strip")
     }
 
     /// Visible standard windows on a screen (id, window, frame).
@@ -165,15 +191,29 @@ final class ScrollStrip {
     }
 
     // MARK: Scrolling
+    //
+    // Moving every window through AX each frame is capped by how fast each app
+    // answers (~30–40 moves a second). So while the strip moves, a picture of every
+    // column (snapshots, refreshed after each stop) slides on top at the display's
+    // frame rate; the real windows move once, when it settles. Without Screen
+    // Recording it falls back to moving the real windows directly.
 
-    /// Finger movement (content direction): the strip follows 1:1.
+    private var proxy: StripProxy?
+    private var snapshots: [CGWindowID: CGImage] = [:]
+    private var wheelTarget: CGFloat?
+    private var wheelIdle: DispatchWorkItem?
+    private var pad: ScrollPad?
+
+    /// Finger or pad movement (content direction): the strip follows 1:1.
     func scroll(by dx: CGFloat) {
         animation?.invalidate()
+        wheelTarget = nil
         closePeek()
+        beginMotion()
         // Past the ends it moves at a third of the speed (rubber band).
         let next = offset - dx
         offset = (next < 0 || next > maxOffset) ? offset - dx / 3 : next
-        applyPositions()
+        render()
     }
 
     /// Fingers lifted with a velocity (pt/s, content direction): coast, then stop on a column edge.
@@ -183,7 +223,31 @@ final class ScrollStrip {
         animate(to: snapped(projected))
     }
 
-    /// One column left or right (mouse wheel, keyboard).
+    /// Smooth, stepless wheel: each tick moves a target, the strip eases after it,
+    /// and once the wheel rests it settles on the nearest column.
+    func wheel(by delta: CGFloat) {
+        closePeek()
+        beginMotion()
+        let base = wheelTarget ?? offset
+        wheelTarget = min(max(base + delta, -60), maxOffset + 60)
+        if animation == nil || !(animation?.isValid ?? false) {
+            animation = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] t in
+                guard let self, let target = self.wheelTarget else { t.invalidate(); return }
+                self.offset += (target - self.offset) * 0.22
+                self.render()
+            }
+        }
+        wheelIdle?.cancel()
+        let w = DispatchWorkItem { [weak self] in
+            guard let self, let target = self.wheelTarget else { return }
+            self.wheelTarget = nil
+            self.animate(to: self.snapped(target))
+        }
+        wheelIdle = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: w)
+    }
+
+    /// One column left or right.
     func step(_ direction: Int) {
         let candidates = snapCandidates()
         let next = direction > 0 ? candidates.first { $0 > offset + 1 } : candidates.last { $0 < offset - 1 }
@@ -209,23 +273,72 @@ final class ScrollStrip {
         animate(to: clamp(target))
     }
 
-    /// Ease the offset to a target (~0.3s); positions only, full frames at the end.
+    /// Ease the offset to a target (~0.3s) at 120 fps, then settle the real windows.
     private func animate(to target: CGFloat) {
         animation?.invalidate()
+        wheelIdle?.cancel()
+        wheelTarget = nil
         let from = offset, began = Date(), duration = 0.3
-        guard abs(target - from) > 0.5 else { offset = clamp(target); applyFrames(); return }
-        animation = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] t in
+        guard abs(target - from) > 0.5 else { offset = clamp(target); endMotion(); return }
+        beginMotion()
+        animation = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] t in
             guard let self else { t.invalidate(); return }
             let k = min(1, Date().timeIntervalSince(began) / duration)
             let e = 1 - pow(1 - k, 3)
             self.offset = from + (target - from) * e
+            self.render()
             if k >= 1 {
                 t.invalidate()
                 self.offset = target
-                self.applyFrames()
-            } else {
-                self.applyPositions()
+                self.endMotion()
             }
+        }
+    }
+
+    /// Where each column truly is at the current offset (not parked), for the picture.
+    private func trueFrames() -> [(CGWindowID, CGRect)] {
+        columns.indices.map { i in
+            let r = CGRect(x: area.minX + start(of: i) - offset, y: area.minY, width: columns[i].width, height: area.height)
+            return (columns[i].id, r.insetBy(dx: gap / 2, dy: gap > 0 ? gap : 0))
+        }
+    }
+
+    /// Motion starts: cover the strip with its picture, if every column has one.
+    private func beginMotion() {
+        pad?.update(offset: offset)
+        guard proxy == nil else { return }
+        Debug.log("strip: begin motion permission=\(WindowCapture.hasPermission) snapshots=\(snapshots.count)/\(columns.count)")
+        guard WindowCapture.hasPermission, columns.allSatisfy({ snapshots[$0.id] != nil }) else { return }
+        let p = StripProxy(area: area, images: snapshots)
+        p.layout(trueFrames())
+        p.show()
+        proxy = p
+    }
+
+    private func render() {
+        pad?.update(offset: offset)
+        if let proxy { proxy.layout(trueFrames()) } else { applyPositions() }
+    }
+
+    /// Motion ended: move the real windows once, then lift the picture off.
+    private func endMotion() {
+        applyFrames()
+        pad?.update(offset: offset)
+        if let p = proxy {
+            proxy = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { p.close() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.refreshSnapshots() }
+    }
+
+    /// Fresh pictures of every column, taken off the main thread.
+    private func refreshSnapshots() {
+        guard isActive, WindowCapture.hasPermission else { return }
+        let ids = columns.map(\.id)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var shots: [CGWindowID: CGImage] = [:]
+            for id in ids { if let img = WindowCapture.snapshot(id) { shots[id] = img } }
+            DispatchQueue.main.async { self?.snapshots.merge(shots) { $1 } }
         }
     }
 
@@ -322,6 +435,25 @@ final class ScrollStrip {
         peekWork = nil
         peek?.close()
         peek = nil
+    }
+
+    // MARK: Scroll pad
+
+    /// Columns as fractions of the whole strip, the visible window, total width.
+    private func padModel() -> ([CGFloat], CGFloat, CGFloat) {
+        let total = max(1, totalWidth)
+        return (columns.map { $0.width / total }, offset / total, area.width / total)
+    }
+
+    /// The pad works like a scroll bar: dragging it right shows what's further right.
+    private func padDragged(_ dx: CGFloat) {
+        guard let pad else { return }
+        scroll(by: -dx * totalWidth / max(1, pad.mapWidth))
+    }
+
+    private func padReleased(_ v: CGFloat) {
+        guard let pad else { return }
+        release(velocity: -v * totalWidth / max(1, pad.mapWidth) * 0.4)
     }
 
     // MARK: Overview
@@ -467,5 +599,184 @@ final class StripOverview: NSObject {
         required init?(coder: NSCoder) { fatalError() }
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
         override func mouseUp(with event: NSEvent) { onClick() }
+    }
+}
+
+/// Pictures of every column sliding over the screen while the strip moves.
+final class StripProxy {
+    private let panel: NSPanel
+    private let root = CALayer()
+    private var layers: [CGWindowID: CALayer] = [:]
+    private let area: CGRect
+
+    init(area: CGRect, images: [CGWindowID: CGImage]) {
+        self.area = area
+        panel = NSPanel(contentRect: Geometry.cocoaRect(fromAX: area), styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered, defer: false)
+        panel.isOpaque = true
+        panel.backgroundColor = .windowBackgroundColor
+        panel.hasShadow = false
+        panel.level = .floating
+        panel.ignoresMouseEvents = true
+        panel.collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle, .transient]
+        // No zoom-out when it goes away: the real windows are already in place.
+        panel.animationBehavior = .none
+        let v = NSView(frame: CGRect(origin: .zero, size: area.size))
+        v.wantsLayer = true
+        v.layer = root
+        root.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        root.isGeometryFlipped = true          // lay out in AX-style top-down coordinates
+        for (id, img) in images {
+            let l = CALayer()
+            l.contents = img
+            l.contentsGravity = .resize
+            l.cornerRadius = 10
+            l.masksToBounds = true
+            root.addSublayer(l)
+            layers[id] = l
+        }
+        panel.contentView = v
+    }
+
+    func layout(_ frames: [(CGWindowID, CGRect)]) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (id, f) in frames {
+            layers[id]?.frame = f.offsetBy(dx: -area.minX, dy: -area.minY)
+        }
+        CATransaction.commit()
+    }
+
+    func show() { panel.orderFrontRegardless() }
+    func close() { panel.orderOut(nil) }
+}
+
+/// The scroll pad: a strip-shaped map at the bottom left, as tall as the Dock.
+/// Drag it like a scroll bar, or scroll the wheel over it — no Shift needed.
+final class ScrollPad: NSPanel {
+    var layout: () -> ([CGFloat], CGFloat, CGFloat) = { ([], 0, 1) }
+    var onDrag: (CGFloat) -> Void = { _ in }
+    var onRelease: (CGFloat) -> Void = { _ in }
+    var onWheel: (CGFloat) -> Void = { _ in }
+    private let view = PadView()
+    var mapWidth: CGFloat { view.mapRect.width }
+
+    init(screen: NSScreen) {
+        let f = screen.frame, vf = screen.visibleFrame
+        let dock = vf.minY - f.minY                  // Cocoa: the Dock sits under the visible frame
+        let height = dock >= 30 ? dock - 8 : 52
+        let y = dock >= 30 ? f.minY + 4 : vf.minY + 8
+        super.init(contentRect: CGRect(x: f.minX + 8, y: y, width: 260, height: height),
+                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        level = NSWindow.Level(NSWindow.Level.dock.rawValue + 1)
+        collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle, .stationary]
+        hidesOnDeactivate = false
+        view.frame = CGRect(x: 0, y: 0, width: 260, height: height)
+        view.onDrag = { [weak self] in self?.onDrag($0) }
+        view.onRelease = { [weak self] in self?.onRelease($0) }
+        view.onWheel = { [weak self] in self?.onWheel($0) }
+        contentView = view
+    }
+
+    func update(offset: CGFloat) {
+        let (cols, start, visible) = layout()
+        view.columns = cols
+        view.viewport = (start, visible)
+        view.needsDisplay = true
+    }
+}
+
+private final class PadView: NSView {
+    var columns: [CGFloat] = [] { didSet { map.columns = columns } }
+    var viewport: (CGFloat, CGFloat) = (0, 1) { didSet { map.viewport = viewport; map.needsDisplay = true } }
+    var onDrag: (CGFloat) -> Void = { _ in }
+    var onRelease: (CGFloat) -> Void = { _ in }
+    var onWheel: (CGFloat) -> Void = { _ in }
+    private var last: (x: CGFloat, t: TimeInterval)?
+    private var velocity: CGFloat = 0
+    private let glass = NSVisualEffectView()
+    private let map = MapView()
+
+    var mapRect: CGRect { bounds.insetBy(dx: 12, dy: 10) }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        glass.material = .hudWindow
+        glass.blendingMode = .behindWindow
+        glass.state = .active
+        glass.wantsLayer = true
+        glass.layer?.cornerRadius = 12
+        glass.autoresizingMask = [.width, .height]
+        glass.frame = bounds
+        addSubview(glass)
+        // Drawn above the glass (a parent's own drawing would sit underneath it).
+        map.frame = bounds
+        map.autoresizingMask = [.width, .height]
+        addSubview(map)
+        toolTip = "拖动或在上面滚动滚轮来滚动卷轴"
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    // The whole pad takes the mouse, not its subviews.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        frame.contains(point) ? self : nil
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        last = (NSEvent.mouseLocation.x, event.timestamp)
+        velocity = 0
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let l = last else { return }
+        let x = NSEvent.mouseLocation.x
+        let dt = max(0.001, event.timestamp - l.t)
+        velocity = 0.7 * velocity + 0.3 * (x - l.x) / CGFloat(dt)
+        last = (x, event.timestamp)
+        onDrag(x - l.x)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        // A press that ended still: no coasting.
+        let still = event.timestamp - (last?.t ?? 0) > 0.06
+        last = nil
+        onRelease(still ? 0 : velocity)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        // Either axis; line-based wheels move 60pt per line, trackpads 1:1 (×2).
+        let raw = abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX) ? -event.scrollingDeltaY : -event.scrollingDeltaX
+        onWheel(event.hasPreciseScrollingDeltas ? raw * 2 : raw * 60)
+    }
+}
+
+/// The strip in miniature: columns and the part on screen.
+private final class MapView: NSView {
+    var columns: [CGFloat] = []
+    var viewport: (CGFloat, CGFloat) = (0, 1)
+
+    override func draw(_ dirtyRect: NSRect) {
+        let map = bounds.insetBy(dx: 12, dy: 10)
+        var x = map.minX
+        for (i, c) in columns.enumerated() {
+            let w = map.width * c
+            let r = CGRect(x: x + 1, y: map.minY, width: max(1, w - 2), height: map.height)
+            NSColor.white.withAlphaComponent(i % 2 == 0 ? 0.30 : 0.20).setFill()
+            NSBezierPath(roundedRect: r, xRadius: 3, yRadius: 3).fill()
+            x += w
+        }
+        let vp = CGRect(x: map.minX + map.width * viewport.0, y: map.minY - 3, width: map.width * viewport.1, height: map.height + 6)
+        NSColor.controlAccentColor.withAlphaComponent(0.35).setFill()
+        let path = NSBezierPath(roundedRect: vp, xRadius: 5, yRadius: 5)
+        path.fill()
+        NSColor.controlAccentColor.setStroke()
+        path.lineWidth = 1.5
+        path.stroke()
     }
 }

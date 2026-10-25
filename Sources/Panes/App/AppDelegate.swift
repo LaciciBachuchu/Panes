@@ -61,6 +61,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             .store(in: &cancellables)
     }
 
+    func applicationWillTerminate(_ note: Notification) {
+        Self.restoreParkedWindows()
+    }
+
+    /// Nothing Panes parked past the screen edge may stay there after it quits.
+    static func restoreParkedWindows() {
+        ScrollStrip.shared.exit()
+        SlideOverController.shared.restoreForQuit()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         openSettings()
         return true
@@ -69,6 +79,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func startServices() {
         // Don't let one hung app stall every mouse click for seconds.
         AXUIElementSetMessagingTimeout(AXWindow.systemWide, 0.3)
+        // Windows a previous run parked off screen come back first.
+        ParkedJournal.recover()
+        ParkedJournal.installTerminationHandlers { Self.restoreParkedWindows() }
         HotKeyManager.shared.reload()
         SnapController.shared.start()
         HoverMoveResize.shared.start()
