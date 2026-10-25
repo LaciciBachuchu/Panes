@@ -9,6 +9,7 @@ struct FeaturesTab: View {
     var body: some View {
         Form {
             gestureSection
+            dividerSection
             carrySection
             slideOverSection
         }
@@ -33,6 +34,20 @@ struct FeaturesTab: View {
                 Text("浏览器标签页、地址栏这类自己会用横向滑动的地方，横向手势留给 App。")
             }
             .font(.caption).foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: 分屏分隔线
+
+    private var dividerSection: some View {
+        Section {
+            Toggle("窗口拼满屏幕时，在缝上显示分隔线", isOn: $settings.data.splitDividersEnabled)
+        } header: {
+            Text("分屏分隔线")
+        } footer: {
+            Text("两扇窗口左右或上下拼满一块屏时（不管是快捷键、吸附还是手动摆的），中间出现一根小竖条；四角、三等分、网格排好的窗口，每条缝都有一根。拖它，缝两边的窗口一起变；松手吸到三分之一、一半或三分之二。")
+                .font(.caption).foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
         }
     }

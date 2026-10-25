@@ -54,6 +54,7 @@ final class WindowManager {
         }
         w.setFrame(frame.integral)
         if let id { lastSet[id] = w.frame ?? frame }
+        SplitDividers.shared.soon()
     }
 
     /// Frame the window had before Panes moved it, if it is still sitting where Panes put it.

@@ -42,6 +42,9 @@ struct SettingsData: Codable {
     // Carry to every Space
     var carryEnabled = true
 
+    // Split dividers
+    var splitDividersEnabled = true
+
     // Slide Over (experimental: off until the float-in-front hand-off works)
     var slideOverEnabled = false
     var slideOverDwell: Double = 0.5
@@ -71,6 +74,7 @@ struct SettingsData: Codable {
         d(.trackpadGesturesEnabled, &trackpadGesturesEnabled); d(.scrollWheelGesturesEnabled, &scrollWheelGesturesEnabled)
         d(.flingEnabled, &flingEnabled); d(.carryEnabled, &carryEnabled)
         d(.slideOverEnabled, &slideOverEnabled); d(.slideOverDwell, &slideOverDwell)
+        d(.splitDividersEnabled, &splitDividersEnabled)
         actions.removeAll { $0.kind.isRemoved }
         // Default names were English before the menu went Chinese; renamed ones stay.
         for i in actions.indices { if let zh = Defaults.chineseNames[actions[i].name] { actions[i].name = zh } }

@@ -53,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                     TitlebarGestures.shared.applySettings()
                     CarryController.shared.applySettings()
                     SlideOverController.shared.applySettings()
+                    SplitDividers.shared.applySettings()
                 }
                 self?.updateStatusItem()
             }
@@ -74,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         LayoutManager.shared.start()
         TitlebarGestures.shared.applySettings()
         CarryController.shared.applySettings()
+        SplitDividers.shared.applySettings()
     }
 
     // MARK: Menu bar
