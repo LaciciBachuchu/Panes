@@ -132,6 +132,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         arrange.submenu = arrangeMenu
         menu.addItem(arrange)
 
+        // One click in and out of the scroll strip, no shortcut needed.
+        let strip = NSMenuItem(title: "卷轴", action: #selector(toggleStrip), keyEquivalent: "")
+        strip.target = self
+        strip.state = ScrollStrip.shared.isActive ? .on : .off
+        strip.image = NSImage(systemSymbolName: "rectangle.split.3x1", accessibilityDescription: nil)
+        strip.toolTip = "把当前屏幕的窗口排成一条横着的卷轴；再点一次复原"
+        menu.addItem(strip)
+
         let carried = CarryController.shared.menuEntries
         if !carried.isEmpty {
             let item = NSMenuItem(title: "带到每张桌面的窗口（\(carried.count)）", action: nil, keyEquivalent: "")
@@ -263,6 +271,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc private func stopAllCarried() { CarryController.shared.stopAll() }
+
+    @objc private func toggleStrip() {
+        // The menu item works even if the feature is switched off in settings.
+        if !Settings.shared.data.scrollStripEnabled { Settings.shared.data.scrollStripEnabled = true }
+        // Let the menu close and focus return to the previous app first.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { ScrollStrip.shared.toggle() }
+    }
 
     @objc private func toggleSnap() { Settings.shared.data.snapEnabled.toggle() }
 
