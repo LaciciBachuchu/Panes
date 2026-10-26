@@ -609,7 +609,8 @@ final class ScrollStrip {
         var insertAt = (columns.firstIndex { $0.id == focusedID }).map { $0 + 1 } ?? columns.count
         var lastID: CGWindowID?
         for (id, w, f) in fresh {
-            originals[id] = f
+            // A window coming back keeps the frame it had before it first joined.
+            if originals[id] == nil { originals[id] = f }
             originalWindows[id] = w
             if WindowCapture.hasPermission, let img = WindowCapture.snapshot(id) { snapshots[id] = img }
             let share = Self.presets.min { abs($0 - f.width / area.width) < abs($1 - f.width / area.width) }!
