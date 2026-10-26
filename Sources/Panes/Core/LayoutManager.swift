@@ -23,7 +23,7 @@ final class LayoutManager {
     static var displayDescription: String {
         let n = NSScreen.screens.count
         let names = NSScreen.screens.map(\.localizedName).joined(separator: " + ")
-        return n == 1 ? names : "\(n) displays: \(names)"
+        return n == 1 ? names : "\(n) 台显示器：\(names)"
     }
 
     private func displaysChanged() {

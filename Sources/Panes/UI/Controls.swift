@@ -10,7 +10,7 @@ struct ShortcutRecorder: View {
     var body: some View {
         HStack(spacing: 4) {
             Button(action: toggle) {
-                Text(recording ? "Type shortcut…" : (shortcut?.displayString ?? "Record"))
+                Text(recording ? "按下快捷键…" : (shortcut?.displayString ?? "录制"))
                     .frame(minWidth: 90)
                     .foregroundStyle(shortcut == nil && !recording ? .secondary : .primary)
             }
@@ -20,7 +20,7 @@ struct ShortcutRecorder: View {
                 Button { shortcut = nil } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
-                    .help("Clear shortcut")
+                    .help("清除快捷键")
             }
         }
         .onDisappear(perform: stop)
@@ -88,7 +88,7 @@ struct UnitRectEditor: View {
             .frame(width: 192, height: 120)
 
             Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 4) {
-                row("X", \.x); row("Y", \.y); row("Width", \.w); row("Height", \.h)
+                row("X", \.x); row("Y", \.y); row("宽", \.w); row("高", \.h)
             }
             .font(.callout)
         }

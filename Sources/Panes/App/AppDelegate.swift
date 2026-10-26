@@ -222,7 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         case "↓": key = String(UnicodeScalar(NSDownArrowFunctionKey)!)
         case "↩": key = "\r"
         case "⌫": key = String(UnicodeScalar(NSBackspaceCharacter)!)
-        case "Space": key = " "
+        case "空格": key = " "
         default: break
         }
         guard !key.isEmpty else { return }
@@ -248,23 +248,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc func saveLayout() {
         let alert = NSAlert()
-        alert.messageText = "Save Current Layout"
-        alert.informativeText = "Saves the position of every visible window on \(LayoutManager.displayDescription)."
+        alert.messageText = "保存当前布局"
+        alert.informativeText = "保存 \(LayoutManager.displayDescription) 上每个可见窗口的位置。"
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        field.stringValue = "Layout \(Settings.shared.data.layouts.count + 1)"
+        field.stringValue = "布局 \(Settings.shared.data.layouts.count + 1)"
         alert.accessoryView = field
-        let auto = NSButton(checkboxWithTitle: "Apply automatically when these displays are connected", target: nil, action: nil)
+        let auto = NSButton(checkboxWithTitle: "连上这组显示器时自动应用", target: nil, action: nil)
         let stack = NSStackView(views: [field, auto])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.frame = NSRect(x: 0, y: 0, width: 360, height: 52)
         alert.accessoryView = stack
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
         NSApp.activate(ignoringOtherApps: true)
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        var layout = LayoutManager.shared.capture(name: field.stringValue.isEmpty ? "Layout" : field.stringValue)
+        var layout = LayoutManager.shared.capture(name: field.stringValue.isEmpty ? "布局" : field.stringValue)
         layout.autoApply = auto.state == .on
         Settings.shared.data.layouts.append(layout)
     }
@@ -298,7 +298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if settingsWindow == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-            w.title = "Panes Settings"
+            w.title = "Panes 设置"
             w.delegate = self
             w.contentView = NSHostingView(rootView: SettingsView().environmentObject(Settings.shared))
             w.isReleasedWhenClosed = false
@@ -323,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc func showOnboarding() {
         if onboardingWindow == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            w.title = "Welcome to Panes"
+            w.title = "欢迎使用 Panes"
             w.delegate = self
             w.contentView = NSHostingView(rootView: OnboardingView())
             w.isReleasedWhenClosed = false
@@ -339,12 +339,12 @@ struct OnboardingView: View {
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "rectangle.split.2x2").font(.system(size: 44)).foregroundStyle(Color.accentColor)
-            Text("Panes needs Accessibility access").font(.title2.bold())
-            Text("macOS only lets apps move and resize other apps' windows with this permission. Turn on Panes in System Settings → Privacy & Security → Accessibility. Panes starts working as soon as it's on.")
+            Text("Panes 需要辅助功能权限").font(.title2.bold())
+            Text("macOS 只允许有这个权限的 App 移动和调整别的 App 的窗口。到“系统设置 → 隐私与安全性 → 辅助功能”里打开 Panes，打开后立刻生效。")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("Open Accessibility Settings") {
+            Button("打开辅助功能设置") {
                 let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
                 AXIsProcessTrustedWithOptions(opts)
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)

@@ -361,7 +361,7 @@ struct PaletteView: View {
             }
             GridPicker(model: model)
                 .frame(width: gridWidth, height: gridWidth * 0.62)
-            Text(model.keyboardHint ? "Drag on the grid · 1–9 picks a preset · Esc closes" : "Drag on the grid to size the window")
+            Text(model.keyboardHint ? "在网格上拖动 · 1–9 选预设 · Esc 关闭" : "在网格上拖动来定窗口大小")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
         }

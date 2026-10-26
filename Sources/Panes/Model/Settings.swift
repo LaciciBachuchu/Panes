@@ -50,6 +50,7 @@ struct SettingsData: Codable {
     var stripScrollSpeed: Double = 1.0
     var stripSnapToColumns = false
     var stripOverviewDuration: Double = 0.65
+    var stripSlideDuration: Double = 0.35
 
     // Slide Over (experimental: off until the float-in-front hand-off works)
     var slideOverEnabled = false
@@ -82,7 +83,7 @@ struct SettingsData: Codable {
         d(.slideOverEnabled, &slideOverEnabled); d(.slideOverDwell, &slideOverDwell)
         d(.splitDividersEnabled, &splitDividersEnabled); d(.scrollStripEnabled, &scrollStripEnabled)
         d(.stripReverseScroll, &stripReverseScroll); d(.stripScrollSpeed, &stripScrollSpeed); d(.stripSnapToColumns, &stripSnapToColumns)
-        d(.stripOverviewDuration, &stripOverviewDuration)
+        d(.stripOverviewDuration, &stripOverviewDuration); d(.stripSlideDuration, &stripSlideDuration)
         actions.removeAll { $0.kind.isRemoved }
         // Default names were English before the menu went Chinese; renamed ones stay.
         for i in actions.indices { if let zh = Defaults.chineseNames[actions[i].name] { actions[i].name = zh } }

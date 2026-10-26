@@ -53,6 +53,12 @@ struct FeaturesTab: View {
                     }
                 }
                 Toggle("停下时对齐到列", isOn: $settings.data.stripSnapToColumns)
+                LabeledContent("滑动动画时长") {
+                    HStack {
+                        Slider(value: $settings.data.stripSlideDuration, in: 0.1...0.8)
+                        Text(String(format: "%.2f 秒", settings.data.stripSlideDuration)).monospacedDigit().frame(width: 60)
+                    }
+                }
                 LabeledContent("预览动画时长") {
                     HStack {
                         Slider(value: $settings.data.stripOverviewDuration, in: 0.15...1.2)

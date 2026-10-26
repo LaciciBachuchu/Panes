@@ -56,7 +56,7 @@ struct Shortcut: Codable, Hashable {
 enum KeyNames {
     static let special: [Int: String] = [
         kVK_LeftArrow: "←", kVK_RightArrow: "→", kVK_UpArrow: "↑", kVK_DownArrow: "↓",
-        kVK_Return: "↩", kVK_Space: "Space", kVK_Delete: "⌫", kVK_ForwardDelete: "⌦",
+        kVK_Return: "↩", kVK_Space: "空格", kVK_Delete: "⌫", kVK_ForwardDelete: "⌦",
         kVK_Escape: "⎋", kVK_Tab: "⇥", kVK_Home: "↖", kVK_End: "↘",
         kVK_PageUp: "⇞", kVK_PageDown: "⇟",
         kVK_F1: "F1", kVK_F2: "F2", kVK_F3: "F3", kVK_F4: "F4", kVK_F5: "F5", kVK_F6: "F6",
@@ -116,18 +116,18 @@ enum ActionKind: String, Codable, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .unitRect: return "Position on grid"
-        case .maximize: return "Maximize"
-        case .almostMaximize: return "Almost maximize"
-        case .maximizeHeight: return "Maximize height"
-        case .center: return "Center"
-        case .restore: return "Restore previous size"
-        case .nextDisplay: return "Move to next display"
-        case .previousDisplay: return "Move to previous display"
-        case .larger: return "Make larger"
-        case .smaller: return "Make smaller"
-        case .showPalette: return "Show palette"
-        case .rollUp, .pin, .magicTiling: return "Removed"
+        case .unitRect: return "放到网格上的位置"
+        case .maximize: return "最大化"
+        case .almostMaximize: return "几乎最大化"
+        case .maximizeHeight: return "最大化高度"
+        case .center: return "居中"
+        case .restore: return "还原之前的大小"
+        case .nextDisplay: return "移到下一个显示器"
+        case .previousDisplay: return "移到上一个显示器"
+        case .larger: return "放大"
+        case .smaller: return "缩小"
+        case .showPalette: return "显示面板"
+        case .rollUp, .pin, .magicTiling: return "已移除"
         case .carry: return "带到每张桌面"
         case .slideOver: return "侧拉"
         case .scrollStrip: return "卷轴"
@@ -142,9 +142,9 @@ enum DisplayTarget: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .current: return "Current display"
-        case .next: return "Next display"
-        case .previous: return "Previous display"
+        case .current: return "当前显示器"
+        case .next: return "下一个显示器"
+        case .previous: return "上一个显示器"
         }
     }
 }
@@ -190,14 +190,14 @@ enum SnapEdge: String, Codable, CaseIterable, Identifiable {
     var isCorner: Bool { [.topLeft, .topRight, .bottomLeft, .bottomRight].contains(self) }
     var label: String {
         switch self {
-        case .left: return "Left edge"
-        case .right: return "Right edge"
-        case .top: return "Top edge"
-        case .bottom: return "Bottom edge"
-        case .topLeft: return "Top-left corner"
-        case .topRight: return "Top-right corner"
-        case .bottomLeft: return "Bottom-left corner"
-        case .bottomRight: return "Bottom-right corner"
+        case .left: return "左边缘"
+        case .right: return "右边缘"
+        case .top: return "上边缘"
+        case .bottom: return "下边缘"
+        case .topLeft: return "左上角"
+        case .topRight: return "右上角"
+        case .bottomLeft: return "左下角"
+        case .bottomRight: return "右下角"
         }
     }
 }
@@ -242,7 +242,7 @@ enum ModifierSet: String, Codable, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .none: return "Off"
+        case .none: return "关"
         case .ctrlOpt: return "⌃⌥"
         case .ctrlCmd: return "⌃⌘"
         case .optCmd: return "⌥⌘"

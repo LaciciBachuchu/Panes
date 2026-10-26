@@ -5,11 +5,11 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     var body: some View {
         TabView {
-            GeneralTab().tabItem { Label("General", systemImage: "gearshape") }
-            ActionsTab().tabItem { Label("Shortcuts", systemImage: "keyboard") }
-            SnapTab().tabItem { Label("Snapping", systemImage: "rectangle.split.2x2") }
-            MouseTab().tabItem { Label("Palette & Mouse", systemImage: "cursorarrow.motionlines") }
-            LayoutsTab().tabItem { Label("Layouts", systemImage: "square.on.square") }
+            GeneralTab().tabItem { Label("通用", systemImage: "gearshape") }
+            ActionsTab().tabItem { Label("快捷键", systemImage: "keyboard") }
+            SnapTab().tabItem { Label("吸附", systemImage: "rectangle.split.2x2") }
+            MouseTab().tabItem { Label("面板与鼠标", systemImage: "cursorarrow.motionlines") }
+            LayoutsTab().tabItem { Label("布局", systemImage: "square.on.square") }
             FeaturesTab().tabItem { Label("窗口功能", systemImage: "sparkles.rectangle.stack") }
         }
         .padding(16)
@@ -31,31 +31,31 @@ struct GeneralTab: View {
                 HStack {
                     Image(systemName: trusted ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(trusted ? .green : .orange)
-                    Text(trusted ? "Accessibility access granted" : "Accessibility access needed")
+                    Text(trusted ? "已获得辅助功能权限" : "需要辅助功能权限")
                     Spacer()
                     if !trusted {
-                        Button("Open Settings") {
+                        Button("打开系统设置") {
                             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
                         }
                     }
                 }
-                Toggle("Launch at login", isOn: $loginItem)
+                Toggle("登录时启动", isOn: $loginItem)
                     .onChange(of: loginItem) { _, v in LoginItem.set(v) }
-                Toggle("Show menu bar icon", isOn: $settings.data.showMenuBarIcon)
+                Toggle("在菜单栏显示图标", isOn: $settings.data.showMenuBarIcon)
                 if !settings.data.showMenuBarIcon {
-                    Text("Open Panes again from Finder or Spotlight to get back to Settings.")
+                    Text("之后要回到设置，从访达或聚焦搜索再打开一次 Panes 就行。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
 
-            Section("Window placement") {
-                LabeledContent("Gap between windows") {
+            Section("窗口摆放") {
+                LabeledContent("窗口间距") {
                     HStack {
                         Slider(value: $settings.data.gap, in: 0...40)
                         Text("\(Int(settings.data.gap)) pt").monospacedDigit().frame(width: 44, alignment: .trailing)
                     }
                 }
-                LabeledContent("Almost maximize size") {
+                LabeledContent("几乎最大化的大小") {
                     HStack {
                         Slider(value: $settings.data.almostMaximizeInset, in: 0.5...0.98)
                         Text("\(Int(settings.data.almostMaximizeInset * 100))%").monospacedDigit().frame(width: 44, alignment: .trailing)
@@ -75,7 +75,7 @@ struct GeneralTab: View {
                     }
                 }
                 HStack {
-                    Menu("Add Running App") {
+                    Menu("添加正在运行的 App") {
                         ForEach(runningApps, id: \.bundleIdentifier) { app in
                             Button(app.localizedName ?? app.bundleIdentifier ?? "?") {
                                 if let b = app.bundleIdentifier, !settings.data.excludedBundleIDs.contains(b) {
@@ -85,19 +85,19 @@ struct GeneralTab: View {
                         }
                     }
                     .fixedSize()
-                    Button("Choose App…") { chooseApp() }
+                    Button("选择 App…") { chooseApp() }
                 }
             } header: {
-                Text("Ignored apps")
+                Text("忽略的 App")
             } footer: {
-                Text("Panes won't snap, move or resize these apps' windows, and its shortcuts pass straight through while they're frontmost — handy for remote desktop, VMs and games.")
+                Text("Panes 不会吸附、移动或调整这些 App 的窗口；它们在最前面时，Panes 的快捷键也直接交给它们——适合远程桌面、虚拟机和游戏。")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
-            Section("Backup") {
+            Section("备份") {
                 HStack {
-                    Button("Export Settings…", action: exportSettings)
-                    Button("Import Settings…", action: importSettings)
+                    Button("导出设置…", action: exportSettings)
+                    Button("导入设置…", action: importSettings)
                 }
             }
         }
@@ -122,7 +122,7 @@ struct GeneralTab: View {
     private func exportSettings() {
         let p = NSSavePanel()
         p.allowedContentTypes = [.json]
-        p.nameFieldStringValue = "Panes Settings.json"
+        p.nameFieldStringValue = "Panes 设置.json"
         guard p.runModal() == .OK, let url = p.url, let data = settings.exportJSON() else { return }
         try? data.write(to: url)
     }
@@ -132,7 +132,7 @@ struct GeneralTab: View {
         p.allowedContentTypes = [.json]
         guard p.runModal() == .OK, let url = p.url, let data = try? Data(contentsOf: url) else { return }
         if !settings.importJSON(data) {
-            let a = NSAlert(); a.messageText = "That file isn't a Panes settings export."; a.runModal()
+            let a = NSAlert(); a.messageText = "这个文件不是 Panes 导出的设置。"; a.runModal()
         }
     }
 }
@@ -159,7 +159,7 @@ struct ActionsTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Every action works straight from its shortcut — no mode to enter first. Unit actions with several sizes cycle when you press the shortcut again (e.g. ½ → ⅔ → ⅓).")
+            Text("每个动作按快捷键就直接生效，不用先进入什么模式。有几种尺寸的动作，再按一次快捷键会切到下一种（比如 ½ → ⅔ → ⅓）。")
                 .font(.callout).foregroundStyle(.secondary)
             List {
                 ForEach($settings.data.actions) { $a in
@@ -170,19 +170,19 @@ struct ActionsTab: View {
                             Text(detail(a)).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Toggle("Palette", isOn: $a.inPalette).toggleStyle(.checkbox).help("Show in the green-button palette")
-                        Toggle("Menu", isOn: $a.inMenu).toggleStyle(.checkbox).help("Show in the menu bar menu")
+                        Toggle("面板", isOn: $a.inPalette).toggleStyle(.checkbox).help("显示在绿色按钮旁的面板里")
+                        Toggle("菜单", isOn: $a.inMenu).toggleStyle(.checkbox).help("显示在菜单栏菜单里")
                         ShortcutRecorder(shortcut: $a.shortcut)
                         Button { editing = a } label: { Image(systemName: "pencil") }.buttonStyle(.borderless)
                     }
                     .padding(.vertical, 2)
                     .contextMenu {
-                        Button("Edit…") { editing = a }
-                        Button("Duplicate") {
-                            var c = a; c.id = UUID(); c.name += " Copy"; c.shortcut = nil
+                        Button("编辑…") { editing = a }
+                        Button("复制一份") {
+                            var c = a; c.id = UUID(); c.name += " 副本"; c.shortcut = nil
                             settings.data.actions.append(c)
                         }
-                        Button("Delete", role: .destructive) { settings.data.actions.removeAll { $0.id == a.id } }
+                        Button("删除", role: .destructive) { settings.data.actions.removeAll { $0.id == a.id } }
                     }
                 }
                 .onMove { settings.data.actions.move(fromOffsets: $0, toOffset: $1) }
@@ -190,16 +190,16 @@ struct ActionsTab: View {
             }
             .listStyle(.inset(alternatesRowBackgrounds: true))
             HStack {
-                Button("Add Action") {
-                    let a = WindowAction(name: "New Action", kind: .unitRect, rects: [UnitRect(0.25, 0, 0.5, 1)], inPalette: true)
+                Button("添加动作") {
+                    let a = WindowAction(name: "新动作", kind: .unitRect, rects: [UnitRect(0.25, 0, 0.5, 1)], inPalette: true)
                     settings.data.actions.append(a)
                     editing = a
                 }
                 Spacer()
                 if let dup = duplicateShortcut {
-                    Label("\(dup) is used twice", systemImage: "exclamationmark.triangle").foregroundStyle(.orange).font(.callout)
+                    Label("\(dup) 被用了两次", systemImage: "exclamationmark.triangle").foregroundStyle(.orange).font(.callout)
                 }
-                Button("Restore Defaults") { settings.resetActions() }
+                Button("恢复默认") { settings.resetActions() }
             }
         }
         .sheet(item: $editing) { a in
@@ -234,14 +234,14 @@ struct ActionEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Edit Action").font(.title3.bold())
+            Text("编辑动作").font(.title3.bold())
             Form {
-                TextField("Name", text: $action.name)
-                Picker("Does", selection: $action.kind) {
+                TextField("名称", text: $action.name)
+                Picker("做什么", selection: $action.kind) {
                     ForEach(ActionKind.allCases) { Text($0.label).tag($0) }
                 }
                 if action.kind == .unitRect {
-                    Picker("On", selection: $action.display) {
+                    Picker("在哪个显示器", selection: $action.display) {
                         ForEach(DisplayTarget.allCases) { Text($0.label).tag($0) }
                     }
                 }
@@ -250,7 +250,7 @@ struct ActionEditor: View {
             .frame(height: action.kind == .unitRect ? 150 : 110)
 
             if action.kind == .unitRect {
-                Text("Positions — pressing the shortcut again moves to the next one").font(.callout).foregroundStyle(.secondary)
+                Text("位置——再按一次快捷键就换到下一个").font(.callout).foregroundStyle(.secondary)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach(action.rects.indices, id: \.self) { i in
@@ -266,12 +266,12 @@ struct ActionEditor: View {
                     }
                 }
                 .frame(maxHeight: 300)
-                Button("Add Cycle Step") { action.rects.append(action.rects.last ?? .leftHalf) }
+                Button("添加一个循环位置") { action.rects.append(action.rects.last ?? .leftHalf) }
             }
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Save") {
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("保存") {
                     if action.kind == .unitRect && action.rects.isEmpty { action.rects = [.leftHalf] }
                     onSave(action); dismiss()
                 }.keyboardShortcut(.defaultAction)
@@ -291,25 +291,25 @@ struct SnapTab: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Snap windows when dragged to screen edges and corners", isOn: $settings.data.snapEnabled)
+                Toggle("拖到屏幕边缘和角落时吸附窗口", isOn: $settings.data.snapEnabled)
                 if settings.data.snapEnabled && SystemTiling.isOn {
                     HStack(alignment: .top) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                        Text("macOS's own edge tiling is on and will fight with Panes. Turn off “Drag windows to screen edges to tile” and “Drag windows to menu bar to fill screen” in Desktop & Dock → Windows.")
+                        Text("macOS 自带的边缘平铺开着，会和 Panes 抢。到“桌面与程序坞 → 窗口”里关掉“将窗口拖到屏幕边缘以平铺”和“将窗口拖到菜单栏以填充屏幕”。")
                             .font(.callout)
                         Spacer()
-                        Button("Open") { SystemTiling.openSettings() }
+                        Button("打开") { SystemTiling.openSettings() }
                     }
                 }
-                Toggle("Restore original size when dragging a snapped window away", isOn: $settings.data.restoreSizeOnDragAway)
-                Toggle("Animate preview", isOn: $settings.data.previewAnimates)
-                Picker("Hold to drag without snapping", selection: $settings.data.disableSnapModifier) {
+                Toggle("把吸附过的窗口拖开时恢复原来的大小", isOn: $settings.data.restoreSizeOnDragAway)
+                Toggle("预览带动画", isOn: $settings.data.previewAnimates)
+                Picker("按住这个键拖动就不吸附", selection: $settings.data.disableSnapModifier) {
                     ForEach([ModifierSet.none, .command, .option, .shift, .control]) { Text($0.label).tag($0) }
                 }
-                LabeledContent("Edge sensitivity") {
+                LabeledContent("边缘灵敏度") {
                     HStack { Slider(value: $settings.data.snapThreshold, in: 1...30); Text("\(Int(settings.data.snapThreshold)) px").monospacedDigit().frame(width: 44) }
                 }
-                LabeledContent("Corner size") {
+                LabeledContent("角落大小") {
                     HStack { Slider(value: $settings.data.cornerSize, in: 10...200); Text("\(Int(settings.data.cornerSize)) px").monospacedDigit().frame(width: 44) }
                 }
             }
@@ -328,18 +328,18 @@ struct SnapTab: View {
                     }
                 }
                 HStack {
-                    Button("Add Snap Area") {
+                    Button("添加吸附区域") {
                         let a = SnapArea(edge: .top, from: 0.4, to: 0.6, target: UnitRect(0.25, 0, 0.5, 1))
                         settings.data.snapAreas.append(a)
                         editing = a
                     }
                     Spacer()
-                    Button("Restore Defaults") { settings.resetSnapAreas() }
+                    Button("恢复默认") { settings.resetSnapAreas() }
                 }
             } header: {
-                Text("Snap areas")
+                Text("吸附区域")
             } footer: {
-                Text("Split an edge into segments to get more targets — e.g. the default bottom edge snaps to thirds. Corners always win over edges.")
+                Text("把一条边分成几段就能有更多目标——比如默认的底边分成三段，各吸附到三分之一。角落总是优先于边。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -386,28 +386,28 @@ struct SnapAreaEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Edit Snap Area").font(.title3.bold())
+            Text("编辑吸附区域").font(.title3.bold())
             Form {
-                Picker("Trigger", selection: $area.edge) {
+                Picker("触发位置", selection: $area.edge) {
                     ForEach(SnapEdge.allCases) { Text($0.label).tag($0) }
                 }
                 if !area.edge.isCorner {
-                    LabeledContent("Segment start") {
+                    LabeledContent("这一段的起点") {
                         HStack { Slider(value: $area.from, in: 0...1); Text("\(Int(area.from * 100))%").monospacedDigit().frame(width: 40) }
                     }
-                    LabeledContent("Segment end") {
+                    LabeledContent("这一段的终点") {
                         HStack { Slider(value: $area.to, in: 0...1); Text("\(Int(area.to * 100))%").monospacedDigit().frame(width: 40) }
                     }
                 }
             }
             .formStyle(.grouped)
             .frame(height: area.edge.isCorner ? 80 : 150)
-            Text("Window goes to").font(.callout).foregroundStyle(.secondary)
+            Text("窗口放到").font(.callout).foregroundStyle(.secondary)
             UnitRectEditor(rect: $area.target)
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Save") {
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("保存") {
                     var a = area
                     if a.from > a.to { (a.from, a.to) = (a.to, a.from) }
                     onSave(a); dismiss()
@@ -427,31 +427,31 @@ struct MouseTab: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Add a Panes tab beside the green-button menu", isOn: $settings.data.paletteOnHover)
-                LabeledContent("Hover delay") {
+                Toggle("在绿色按钮的菜单旁加一个 Panes 小标签", isOn: $settings.data.paletteOnHover)
+                LabeledContent("悬停延迟") {
                     HStack { Slider(value: $settings.data.paletteHoverDelay, in: 0.1...1.5); Text(String(format: "%.2fs", settings.data.paletteHoverDelay)).monospacedDigit().frame(width: 48) }
                 }
-                Stepper("Grid columns: \(settings.data.gridColumns)", value: $settings.data.gridColumns, in: 2...24)
-                Stepper("Grid rows: \(settings.data.gridRows)", value: $settings.data.gridRows, in: 2...24)
+                Stepper("网格列数：\(settings.data.gridColumns)", value: $settings.data.gridColumns, in: 2...24)
+                Stepper("网格行数：\(settings.data.gridRows)", value: $settings.data.gridRows, in: 2...24)
             } header: {
-                Text("Palette")
+                Text("面板")
             } footer: {
-                Text("Hovering a green button keeps macOS's own menu and adds a small grid tab next to it — point at the tab to open the palette. Clicking the green button still works as usual. Choose which presets appear in the Shortcuts tab; the “Show Palette” shortcut (⌃⌥P) opens it directly.")
+                Text("指针停在绿色按钮上时，macOS 自己的菜单照常出现，旁边多一个小网格标签——指向它就打开面板。点绿色按钮还是原来的行为。面板里显示哪些预设，在“快捷键”页里选；“显示面板”的快捷键（⌃⌥P）可以直接打开它。")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
             Section {
-                Picker("Move window under cursor", selection: $settings.data.moveModifier) {
+                Picker("移动指针下的窗口", selection: $settings.data.moveModifier) {
                     ForEach(ModifierSet.allCases) { Text($0.label).tag($0) }
                 }
-                Picker("Resize window under cursor", selection: $settings.data.resizeModifier) {
+                Picker("调整指针下窗口的大小", selection: $settings.data.resizeModifier) {
                     ForEach(ModifierSet.allCases) { Text($0.label).tag($0) }
                 }
-                Toggle("Bring window to front when moving it", isOn: $settings.data.raiseOnHoverMove)
+                Toggle("移动时把窗口提到最前", isOn: $settings.data.raiseOnHoverMove)
             } header: {
-                Text("Hover move & resize")
+                Text("悬停移动与调整大小")
             } footer: {
-                Text("Hold the keys and move the mouse — no clicking. Resize grabs the corner nearest the cursor.")
+                Text("按住这些键移动鼠标就行，不用点击。调整大小时抓的是离指针最近的那个角。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -469,7 +469,7 @@ struct LayoutsTab: View {
         Form {
             Section {
                 if settings.data.layouts.isEmpty {
-                    Text("No layouts yet. Arrange your windows, then save them here or from the menu bar.")
+                    Text("还没有布局。先把窗口摆好，再在这里或菜单栏里保存。")
                         .foregroundStyle(.secondary)
                 }
                 ForEach($settings.data.layouts) { $l in
@@ -477,27 +477,27 @@ struct LayoutsTab: View {
                         HStack {
                             TextField("", text: $l.name).textFieldStyle(.plain).font(.headline)
                             if l.displaySignature == LayoutManager.displaySignature {
-                                Text("these displays").font(.caption).padding(.horizontal, 6).padding(.vertical, 2)
+                                Text("当前显示器").font(.caption).padding(.horizontal, 6).padding(.vertical, 2)
                                     .background(Color.green.opacity(0.2), in: Capsule())
                             }
                             Spacer()
                             ShortcutRecorder(shortcut: $l.shortcut)
-                            Button("Restore") { LayoutManager.shared.restore(l) }
+                            Button("恢复") { LayoutManager.shared.restore(l) }
                             Menu {
-                                Button("Update to Current Windows") {
+                                Button("更新为当前窗口") {
                                     let fresh = LayoutManager.shared.capture(name: l.name)
                                     l.windows = fresh.windows
                                     l.displaySignature = fresh.displaySignature
                                 }
-                                Button(expanded == l.id ? "Hide Windows" : "Show Windows") { expanded = expanded == l.id ? nil : l.id }
+                                Button(expanded == l.id ? "收起窗口列表" : "显示窗口列表") { expanded = expanded == l.id ? nil : l.id }
                                 Divider()
-                                Button("Delete", role: .destructive) { settings.data.layouts.removeAll { $0.id == l.id } }
+                                Button("删除", role: .destructive) { settings.data.layouts.removeAll { $0.id == l.id } }
                             } label: { Image(systemName: "ellipsis.circle") }
                                 .menuStyle(.borderlessButton).fixedSize()
                         }
-                        Toggle("Apply automatically when this display setup is connected", isOn: $l.autoApply)
+                        Toggle("连上这组显示器时自动应用", isOn: $l.autoApply)
                             .font(.callout)
-                        Text("\(l.windows.count) windows · \(Set(l.windows.map(\.bundleID)).count) apps")
+                        Text("\(l.windows.count) 个窗口 · \(Set(l.windows.map(\.bundleID)).count) 个 App")
                             .font(.caption).foregroundStyle(.secondary)
                         if expanded == l.id {
                             ForEach(Array(l.windows.enumerated()), id: \.offset) { _, w in
@@ -513,16 +513,16 @@ struct LayoutsTab: View {
                 }
             } header: {
                 HStack {
-                    Text("Saved layouts")
+                    Text("保存的布局")
                     Spacer()
-                    Button("Save Current Layout…") { (NSApp.delegate as? AppDelegate)?.saveLayout() }
+                    Button("保存当前布局…") { (NSApp.delegate as? AppDelegate)?.saveLayout() }
                 }
             } footer: {
-                Text("Layouts match windows by app and title. Minimized windows are left alone, and ignored apps are skipped. On a different monitor setup, windows keep their relative positions.")
+                Text("布局按 App 和窗口标题对应窗口。最小化的窗口不动，忽略的 App 会跳过。换了一组显示器时，窗口保持相对位置。")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
-                Toggle("Leave minimized windows minimized when restoring", isOn: $settings.data.skipMinimizedOnRestore)
+                Toggle("恢复布局时，最小化的窗口保持最小化", isOn: $settings.data.skipMinimizedOnRestore)
             }
         }
         .formStyle(.grouped)
