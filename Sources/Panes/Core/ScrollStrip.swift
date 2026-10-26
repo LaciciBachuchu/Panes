@@ -130,7 +130,7 @@ final class ScrollStrip {
         p.layout = { [weak self] in self?.padModel() ?? ([], 0, 1) }
         p.onDrag = { [weak self] dx in self?.padDragged(dx) }
         p.onRelease = { [weak self] v in self?.padReleased(v) }
-        p.onDoubleClick = { [weak self] in self?.showOverview() }
+        p.onDoubleClick = { [weak self] in self?.toggleOverview() }
         p.onWheel = { [weak self] d in
             let s = Settings.shared.data
             self?.wheel(by: d * CGFloat(s.stripScrollSpeed) * (s.stripReverseScroll ? -1 : 1))
@@ -277,6 +277,8 @@ final class ScrollStrip {
 
     /// Finger or pad movement (content direction): the strip follows 1:1.
     func scroll(by dx: CGFloat) {
+        // The overview has the windows stepped aside: nothing moves under it.
+        guard overview == nil else { return }
         animation?.invalidate()
         wheelTarget = nil
         closePeek()
@@ -297,6 +299,7 @@ final class ScrollStrip {
     /// Smooth, stepless wheel: each tick moves a target, the strip eases after it,
     /// and once the wheel rests it settles on the nearest column.
     func wheel(by delta: CGFloat) {
+        guard overview == nil else { return }
         closePeek()
         beginMotion()
         let base = wheelTarget ?? offset
@@ -372,6 +375,7 @@ final class ScrollStrip {
 
     /// Ease the offset to a target (~0.3s) at 120 fps, then settle the real windows.
     private func animate(to target: CGFloat) {
+        guard overview == nil else { return }
         animation?.invalidate()
         wheelIdle?.cancel()
         wheelTarget = nil
@@ -485,6 +489,8 @@ final class ScrollStrip {
     /// the moment they've landed. Checking that every app took its column's width
     /// (a read per window) waits until after, off the critical path.
     private func endMotion() {
+        // Under the overview the windows stay aside; it puts them back when it closes.
+        guard overview == nil else { return }
         pad?.update(offset: offset)
         let p = proxy
         proxy = nil
