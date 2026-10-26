@@ -41,6 +41,8 @@ final class ScrollStrip {
     private var peek: PeekCard?
     private var peekWork: DispatchWorkItem?
     private var overview: StripOverview?
+    /// ⌃↑ opens the strip overview instead of Mission Control, only while a strip is on.
+    private var missionControlKey: KeyIntercept?
 
     var isActive: Bool { !columns.isEmpty }
     private var gap: CGFloat { CGFloat(Settings.shared.data.gap) }
@@ -131,6 +133,7 @@ final class ScrollStrip {
         pad = p
         p.update(offset: offset)
         p.orderFrontRegardless()
+        missionControlKey = KeyIntercept(keyCode: 126, flags: .maskControl) { [weak self] in self?.toggleOverview() }
         HotKeyManager.shared.reload()
         Debug.log("strip: \(columns.count) columns, total \(Int(totalWidth))pt")
         GestureHUD.shared.flash("卷轴：\(columns.count) 列", symbol: "rectangle.split.3x1", anchor: CGPoint(x: area.midX, y: area.minY + 40))
@@ -143,6 +146,7 @@ final class ScrollStrip {
         wheelTarget = nil
         proxy?.close(); proxy = nil
         pad?.orderOut(nil); pad = nil
+        missionControlKey = nil
         snapshots = [:]
         backdrop = nil
         closePeek()
@@ -209,15 +213,16 @@ final class ScrollStrip {
         return CGRect(x: full.minX, y: full.minY, width: full.width, height: min(h, full.height))
     }
 
-    /// Some windows won't grow to the column (small fixed-size panels, minimum/maximum
-    /// sizes). Read back what each one actually took and size its column to that, so
-    /// nothing is pictured stretched.
+    /// Windows don't always take the size asked for: fixed-size panels stay small,
+    /// minimum sizes keep others wider than their slot. Read back what each one
+    /// actually took and size its column to that, so neighbours never overlap and no
+    /// picture is stretched or squeezed.
     private func fitColumnsToWindows() {
         var changed = false
         for i in columns.indices {
             let want = frame(of: i, at: offset)
             guard let got = columns[i].window.frame else { continue }
-            if got.width < want.width - 4 { columns[i].width = got.width + gap; changed = true }
+            if abs(got.width - want.width) > 3 { columns[i].width = got.width + gap; changed = true }
             if got.height < want.height - 4 { columns[i].height = got.height; changed = true }
         }
         if changed {
@@ -404,6 +409,7 @@ final class ScrollStrip {
     /// Motion ended: move the real windows once, then lift the picture off.
     private func endMotion() {
         applyFrames()
+        fitColumnsToWindows()
         pad?.update(offset: offset)
         if let p = proxy {
             proxy = nil
@@ -660,6 +666,11 @@ final class ScrollStrip {
 
     // MARK: Overview
 
+    /// ⌃↑: open the overview, or close it if it's open.
+    func toggleOverview() {
+        if let o = overview { o.dismiss() } else { showOverview() }
+    }
+
     /// The whole strip at a glance (double-click the pad, or pinch out on a title
     /// bar): the screen zooms out from where things are now; pick a window and it
     /// zooms back in onto that window's column.
@@ -790,7 +801,7 @@ final class StripOverview: NSObject {
 
     func present() {
         panel.orderFrontRegardless()
-        animate(to: target, dim: 0.5, backdropScale: 1) {}
+        animate(to: target, dim: 0, backdropScale: 1) {}
         keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] e in
             if e.keyCode == 53 { self?.dismiss() }        // Esc
         }
