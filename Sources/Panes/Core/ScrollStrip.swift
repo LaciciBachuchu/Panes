@@ -149,6 +149,9 @@ final class ScrollStrip {
         snapshots = [:]
         closePeek()
         overview?.close(); overview = nil
+        // A stow still under way must land before the windows go back.
+        _ = stowing?.wait(timeout: .now() + 0.5)
+        stowing = nil
         // Everything that was ever in the strip goes back, not only what's still listed.
         for (id, f) in originals {
             guard let w = originalWindows[id], AXWindow.serverFrame(of: id) != nil else { continue }
@@ -398,25 +401,61 @@ final class ScrollStrip {
         // Once the pictures are up, the real windows step out from under them.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self, weak p] in
             guard let self, let p, self.proxy === p else { return }
-            self.stowWindows()
+            self.stowWindows(done: {})
         }
+    }
+
+    /// Windows on their way out right now (see stowWindows).
+    private var stowing: DispatchGroup?
+
+    /// Runs `f` once no window is still on its way out, so a window put back is
+    /// never moved out again by a late stow.
+    private func afterStow(_ f: @escaping () -> Void) {
+        guard let g = stowing else { return f() }
+        g.notify(queue: .main, execute: f)
     }
 
     /// While pictures stand in for the strip, the real windows wait just past the
     /// screen edge, so the live desktop (a moving wallpaper, widgets) shows between
     /// the pictures. 1pt stays on screen so macOS doesn't hand them to another
     /// display; they go out on the side that has no display next to it.
-    private func stowWindows() {
-        guard let screen else { return }
+    /// All windows move at once, each on its own thread, so one busy app doesn't hold
+    /// up the rest; `done` runs on the main thread when they're out (or after 0.3s).
+    private func stowWindows(done: @escaping () -> Void) {
+        guard let screen else { return done() }
         let frame = screen.axFrame
         let neighbourRight = NSScreen.screens.contains { s in
             let f = s.axFrame
             return s != screen && f.minX >= frame.maxX - 1 && f.minY < frame.maxY && f.maxY > frame.minY
         }
-        for c in columns {
+        let moves = columns.map { c -> (AXWindow, CGPoint) in
             let slot = slot(x: 0, column: c)
-            c.window.setPosition(CGPoint(x: neighbourRight ? frame.minX - slot.width + 1 : frame.maxX - 1, y: slot.minY))
+            return (c.window, CGPoint(x: neighbourRight ? frame.minX - slot.width + 1 : frame.maxX - 1, y: slot.minY))
         }
+        let group = DispatchGroup()
+        for (w, p) in moves {
+            group.enter()
+            DispatchQueue.global(qos: .userInteractive).async {
+                w.setPosition(p)
+                group.leave()
+            }
+        }
+        stowing = group
+        var fired = false
+        let fire = {
+            guard !fired else { return }
+            fired = true
+            done()
+        }
+        group.notify(queue: .main) { [weak self] in
+            if self?.stowing === group { self?.stowing = nil }
+            fire()
+            if Debug.enabled {
+                let stuck = moves.filter { w, p in abs((w.frame?.minX ?? p.x) - p.x) > 2 }.map { $0.0.bundleID ?? "?" }
+                if !stuck.isEmpty { Debug.log("strip: stow refused by \(stuck)") }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: fire)
     }
 
     private func render() {
@@ -426,14 +465,19 @@ final class ScrollStrip {
 
     /// Motion ended: move the real windows once, then lift the picture off.
     private func endMotion() {
-        applyFrames()
-        fitColumnsToWindows()
         pad?.update(offset: offset)
-        if let p = proxy {
-            proxy = nil
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { p.close() }
+        let p = proxy
+        proxy = nil
+        afterStow { [weak self] in
+            guard let self, self.isActive else { p?.close(); return }
+            // A new motion that started meanwhile keeps the windows out.
+            if self.proxy == nil && self.overview == nil {
+                self.applyFrames()
+                self.fitColumnsToWindows()
+            }
+            if let p { DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { p.close() } }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.refreshSnapshots() }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.refreshSnapshots() }
     }
 
     /// Columns at least half on screen: a parked window's picture would come out blank.
@@ -701,31 +745,40 @@ final class ScrollStrip {
         for id in mostlyVisibleColumns() { if let img = WindowCapture.snapshot(id) { snapshots[id] = img } }
         let images = snapshots
         Debug.log("strip: overview with pictures for \(columns.filter { images[$0.id] != nil }.count)/\(columns.count); missing \(columns.filter { images[$0.id] == nil }.map { $0.window.bundleID ?? "?" })")
-        let o = StripOverview(area: area, images: images,
+        var icons: [CGWindowID: NSImage] = [:]
+        for c in columns { icons[c.id] = NSRunningApplication(processIdentifier: c.window.pid)?.icon }
+        let o = StripOverview(area: area, images: images, icons: icons,
                               now: trueFrames(), overview: overviewFrames())
         o.onPick = { [weak self, weak o] id in
             guard let self, let o else { return }
             let target = self.visibleOffset(for: id)
             o.zoomIn(to: self.trueFrames(at: target)) {
-                self.offset = target
-                self.applyFrames()
-                self.pad?.update(offset: target)
-                self.columns.first { $0.id == id }?.window.raise()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                    o.close()
-                    self.overview = nil
+                self.afterStow {
+                    self.offset = target
+                    self.applyFrames()
+                    self.pad?.update(offset: target)
+                    self.columns.first { $0.id == id }?.window.raise()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                        o.close()
+                        self.overview = nil
+                    }
                 }
             }
         }
-        o.onDismiss = { [weak self] in
-            self?.applyFrames()
-            self?.overview = nil
+        o.onDismiss = { [weak self, weak o] in
+            self?.afterStow {
+                self?.applyFrames()
+                self?.overview = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { o?.close() }
+            }
         }
         overview = o
-        o.present()
+        // The tiles go up exactly over the windows; the windows step out from under
+        // them, and only then does the view pull back, so no real window shows behind.
+        o.show()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self, weak o] in
             guard let self, let o, self.overview === o else { return }
-            self.stowWindows()
+            self.stowWindows { o.present() }
         }
     }
 
@@ -764,6 +817,9 @@ final class StripOverview: NSObject {
     private let panel: NSPanel
     private let root = CALayer()
     private var tiles: [CGWindowID: CALayer] = [:]
+    /// Each tile's app icon, under its bottom edge; shown once the view has pulled back.
+    private var badges: [CALayer] = []
+    private var dismissed = false
     private let area: CGRect
     private let now: [(CGWindowID, CGRect)]
     private let target: [(CGWindowID, CGRect)]
@@ -774,7 +830,7 @@ final class StripOverview: NSObject {
         return d > 0 ? d : 0.65
     }
 
-    init(area: CGRect, images: [CGWindowID: CGImage],
+    init(area: CGRect, images: [CGWindowID: CGImage], icons: [CGWindowID: NSImage],
          now: [(CGWindowID, CGRect)], overview: [(CGWindowID, CGRect)]) {
         self.area = area
         self.now = now
@@ -785,7 +841,8 @@ final class StripOverview: NSObject {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
-        panel.level = .floating
+        // Over always-on-top windows too, just under the Dock.
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.dock.rawValue - 1)
         panel.animationBehavior = .none
         panel.collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle, .transient]
         let view = OverviewView(frame: CGRect(origin: .zero, size: area.size))
@@ -808,17 +865,48 @@ final class StripOverview: NSObject {
             root.addSublayer(l)
             tiles[id] = l
         }
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        for (id, f) in overview {
+            guard let icon = icons[id] else { continue }
+            let r = StripProxy.local(f, in: area)
+            let side = min(56, r.width * 0.4)
+            var rect = CGRect(x: 0, y: 0, width: side * scale, height: side * scale)
+            let b = CALayer()
+            b.contents = icon.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+            b.frame = CGRect(x: r.midX - side / 2, y: r.minY - side * 0.35, width: side, height: side)
+            b.shadowOpacity = 0.35
+            b.shadowRadius = 6
+            b.shadowOffset = CGSize(width: 0, height: -2)
+            b.opacity = 0
+            root.addSublayer(b)
+            badges.append(b)
+        }
         view.onClick = { [weak self] p in self?.clicked(p) }
         panel.contentView = view
     }
 
     private func local(_ ax: CGRect) -> CGRect { StripProxy.local(ax, in: area) }
 
+    /// Up over the windows, tiles exactly where the windows are: nothing changes yet.
+    func show() { panel.orderFrontRegardless() }
+
     func present() {
+        guard !dismissed else { return }
         panel.orderFrontRegardless()
-        animate(to: target) {}
+        animate(to: target) { [weak self] in self?.fadeBadges(to: 1, duration: 0.2) }
         keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] e in
             if e.keyCode == 53 { self?.dismiss() }        // Esc
+        }
+    }
+
+    private func fadeBadges(to opacity: Float, duration: CFTimeInterval) {
+        for b in badges {
+            let a = CABasicAnimation(keyPath: "opacity")
+            a.fromValue = b.presentation()?.opacity ?? b.opacity
+            a.toValue = opacity
+            a.duration = duration
+            b.opacity = opacity
+            b.add(a, forKey: "opacity")
         }
     }
 
@@ -865,17 +953,16 @@ final class StripOverview: NSObject {
     func zoomIn(to frames: [(CGWindowID, CGRect)], done: @escaping () -> Void) {
         if let m = keyMonitor { NSEvent.removeMonitor(m) }
         keyMonitor = nil
+        dismissed = true
+        fadeBadges(to: 0, duration: 0.12)
         animate(to: frames, done: done)
     }
 
     /// Esc or a click on empty space: zoom back to how things were.
     func dismiss() {
         guard !busy else { return }
-        // The windows go back first, then the tiles over them lift off.
-        zoomIn(to: now) { [weak self] in
-            self?.onDismiss()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { self?.close() }
-        }
+        // The owner puts the windows back, then lifts the tiles off.
+        zoomIn(to: now) { [weak self] in self?.onDismiss() }
     }
 
     func close() {
