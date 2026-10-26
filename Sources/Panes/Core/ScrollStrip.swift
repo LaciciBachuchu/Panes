@@ -420,17 +420,17 @@ final class ScrollStrip {
         snapCandidates().min { abs($0 - projected) < abs($1 - projected) } ?? clamp(projected)
     }
 
-    func scroll(toColumnOf id: CGWindowID) {
+    func scroll(toColumnOf id: CGWindowID, curve: @escaping (Double) -> CGFloat = ScrollStrip.ease) {
         guard let i = columns.firstIndex(where: { $0.id == id }) else { return }
         // Bring it fully on screen with the least movement.
         let s = start(of: i), w = columns[i].width
         var target = offset
         if s < offset { target = s } else if s + w > offset + area.width { target = s + w - area.width }
-        animate(to: clamp(target))
+        animate(to: clamp(target), curve: curve)
     }
 
     /// Ease the offset to a target (~0.3s) at 120 fps, then settle the real windows.
-    private func animate(to target: CGFloat) {
+    private func animate(to target: CGFloat, curve: @escaping (Double) -> CGFloat = ScrollStrip.ease) {
         guard overview == nil else { return }
         animation?.invalidate()
         wheelIdle?.cancel()
@@ -441,7 +441,7 @@ final class ScrollStrip {
         animation = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] t in
             guard let self else { t.invalidate(); return }
             let k = min(1, Date().timeIntervalSince(began) / duration)
-            let e = Self.ease(k)
+            let e = curve(k)
             self.offset = from + (target - from) * e
             self.render()
             if k >= 1 {
@@ -455,6 +455,13 @@ final class ScrollStrip {
     /// Slides (to a column, a window joining or leaving): length from Settings
     /// (卷轴 → 滑动动画时长).
     static var slideDuration: TimeInterval { max(0.05, Settings.shared.data.stripSlideDuration) }
+
+    /// Gentle start, quick middle, gentle landing: for travelling to a window you
+    /// switched to, so the trip reads as one smooth move.
+    static func easeInOut(_ k: Double) -> CGFloat {
+        let k = min(max(k, 0), 1)
+        return CGFloat(k < 0.5 ? 4 * k * k * k : 1 - Foundation.pow(-2 * k + 2, 3) / 2)
+    }
 
     /// Fast off the mark, then a long soft landing.
     static func ease(_ k: Double) -> CGFloat {
@@ -861,7 +868,7 @@ final class ScrollStrip {
         lastFocusedColumn = id
         guard abs(visibleOffset(for: id) - offset) > 1 else { return }
         Debug.log("strip: revealing column \(id)")
-        scroll(toColumnOf: id)
+        scroll(toColumnOf: id, curve: Self.easeInOut)
     }
 
     private func removeMonitors() {
