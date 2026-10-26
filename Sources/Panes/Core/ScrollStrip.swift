@@ -63,6 +63,14 @@ final class ScrollStrip {
         debugHook = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("local.thomas.panes.debug.stripOverview"), object: nil, queue: .main
         ) { [weak self] _ in self?.showOverview() }
+        // Debug: where the Dock is and where the scroll pad would go.
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("local.thomas.panes.debug.padPlacement"), object: nil, queue: .main
+        ) { _ in
+            for screen in NSScreen.screens {
+                Debug.log("pad: dock icons \(String(describing: ScrollPad.dockIconsFrame())) → pad \(ScrollPad.placement(on: screen)) on \(screen.localizedName)")
+            }
+        }
         // Debug: a burst of 8 wheel ticks of `delta` points, 30ms apart, like a wheel spin.
         DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("local.thomas.panes.debug.stripWheel"), object: nil, queue: .main
@@ -782,7 +790,7 @@ final class StripOverview: NSObject {
 
     func present() {
         panel.orderFrontRegardless()
-        animate(to: target, dim: 0.5, backdropScale: 0.94) {}
+        animate(to: target, dim: 0.5, backdropScale: 1) {}
         keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] e in
             if e.keyCode == 53 { self?.dismiss() }        // Esc
         }
@@ -985,24 +993,44 @@ final class ScrollPad: NSPanel {
     var mapWidth: CGFloat { view.mapRect.width }
 
     init(screen: NSScreen) {
-        let f = screen.frame, vf = screen.visibleFrame
-        let dock = vf.minY - f.minY                  // Cocoa: the Dock sits under the visible frame
-        let height = dock >= 30 ? dock - 8 : 52
-        let y = dock >= 30 ? f.minY + 4 : vf.minY + 8
-        super.init(contentRect: CGRect(x: f.minX + 8, y: y, width: 260, height: height),
-                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let frame = Self.placement(on: screen)
+        super.init(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
         level = NSWindow.Level(NSWindow.Level.dock.rawValue + 1)
         collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle, .stationary]
         hidesOnDeactivate = false
-        view.frame = CGRect(x: 0, y: 0, width: 260, height: height)
+        view.frame = CGRect(origin: .zero, size: frame.size)
         view.onDrag = { [weak self] in self?.onDrag($0) }
         view.onRelease = { [weak self] in self?.onRelease($0) }
         view.onWheel = { [weak self] in self?.onWheel($0) }
         view.onDoubleClick = { [weak self] in self?.onDoubleClick() }
         contentView = view
+    }
+
+    /// Bottom left, as tall as the Dock, in the free space left of the Dock's icons;
+    /// when there's no room there, just above the Dock. Never on top of the Dock.
+    static func placement(on screen: NSScreen) -> CGRect {
+        let f = screen.frame, vf = screen.visibleFrame
+        let band = vf.minY - f.minY                              // Cocoa: a bottom Dock sits under the visible frame
+        let width: CGFloat = 260
+        guard band >= 30 else { return CGRect(x: vf.minX + 8, y: vf.minY + 8, width: width, height: 52) }
+        let room = (dockIconsFrame().map { $0.minX } ?? f.midX) - f.minX - 16
+        if room >= 140 {
+            return CGRect(x: f.minX + 8, y: f.minY + 4, width: min(width, room), height: band - 8)
+        }
+        return CGRect(x: vf.minX + 8, y: vf.minY + 8, width: width, height: 52)
+    }
+
+    /// Where the Dock's row of icons is (Cocoa space), asked of the Dock itself so it
+    /// works even while the Dock is hidden.
+    static func dockIconsFrame() -> CGRect? {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return nil }
+        let app = AXUIElementCreateApplication(dock.processIdentifier)
+        let kids: [AXUIElement] = app.attr(kAXChildrenAttribute) ?? []
+        guard let list = kids.first(where: { $0.role == "AXList" }), let r = list.frame else { return nil }
+        return Geometry.cocoaRect(fromAX: r)
     }
 
     func update(offset: CGFloat) {
