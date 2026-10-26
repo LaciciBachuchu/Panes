@@ -3,6 +3,7 @@ import AppKit
 /// Watches title-bar drags and is the one place that decides what letting go does.
 /// While dragging it shows a preview of the outcome; on release exactly one of
 /// these happens, in this order:
+///   0. the window is a column of the scroll strip → it moves to the slot under the pointer,
 ///   1. a dwell target was reached (rest at the middle of the left/right edge →
 ///      slide over),
 ///   2. the slide-over window was dropped on / thrown at its own edge → tuck it away,
@@ -128,6 +129,7 @@ final class SnapController {
     }
 
     private enum Drop {
+        case stripReorder
         case slideOver(SlideOverController.Side, NSScreen)
         case stash
         case snap(SnapArea, NSScreen)
@@ -138,6 +140,7 @@ final class SnapController {
     /// The single decision for a released title-bar drag.
     private func resolveDrop(_ w: AXWindow) -> Drop {
         let p = Geometry.mouseAX
+        if ScrollStrip.shared.contains(w) { return .stripReorder }
         let bypass = settings.disableSnapModifier.matches(NSEvent.modifierFlags)
         if !bypass, dwellReached, case .edgeMiddle(let side)? = dwellZone, let screen = NSScreen.screen(containingAX: p) {
             return .slideOver(side, screen)
@@ -158,6 +161,8 @@ final class SnapController {
         // Let the app finish its own drag before we reposition.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
             switch drop {
+            case .stripReorder:
+                ScrollStrip.shared.reorder(w, pointer: Geometry.mouseAX)
             case .slideOver(let side, let screen):
                 slide.dock(w, side: side, screen: screen)
             case .stash:
@@ -193,6 +198,7 @@ final class SnapController {
     /// Starts the dwell timer when the pointer enters a zone; the pointer often
     /// rests without any drag events, so the timer re-evaluates the preview itself.
     private func updateDwell(at p: CGPoint) {
+        if let w = window, ScrollStrip.shared.contains(w) { return }
         let zone = dwellZone(at: p)
         guard zone != dwellZone else { return }
         dwellZone = zone
@@ -234,6 +240,12 @@ final class SnapController {
     }
 
     private func updatePreview(at p: CGPoint, flags: NSEvent.ModifierFlags) {
+        // Strip columns don't snap: show where the column will go in the strip.
+        if let w = window, let slot = ScrollStrip.shared.reorderSlot(for: w, pointer: p) {
+            current = nil
+            PreviewOverlay.shared.show(axFrame: slot.frame, label: "放到这里", style: .slideOver)
+            return
+        }
         // A reached dwell target shows its own, differently labelled preview.
         if dwellReached, case .edgeMiddle(let side)? = dwellZone, !settings.disableSnapModifier.matches(flags),
            let screen = NSScreen.screen(containingAX: p), let size = window?.frame?.size {

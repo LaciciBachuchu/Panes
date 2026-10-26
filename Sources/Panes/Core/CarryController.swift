@@ -83,6 +83,7 @@ final class CarryController {
         strip.onClose = { [weak self] in self?.stop(id) }
         items[id] = c
         carried.append(id)
+        defer { watchers[c.pid]?.add(w.element, kAXUIElementDestroyedNotification) }
         Debug.log("carry: \(w.bundleID ?? "?") id=\(id)")
         watch(c.pid)
         observeSpaces()

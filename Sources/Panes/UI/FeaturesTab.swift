@@ -46,11 +46,21 @@ struct FeaturesTab: View {
             Toggle("卷轴", isOn: $settings.data.scrollStripEnabled)
             if settings.data.scrollStripEnabled {
                 LabeledContent("快捷键") { ShortcutRecorder(shortcut: shortcut(for: .scrollStrip)) }
+                Toggle("反转滚动方向", isOn: $settings.data.stripReverseScroll)
+                LabeledContent("滚动灵敏度") {
+                    HStack {
+                        Slider(value: $settings.data.stripScrollSpeed, in: 0.25...4)
+                        Text(String(format: "%.2f×", settings.data.stripScrollSpeed)).monospacedDigit().frame(width: 50)
+                    }
+                }
+                Toggle("停下时对齐到列", isOn: $settings.data.stripSnapToColumns)
+                LabeledContent("这一列左移") { ShortcutRecorder(shortcut: shortcut(for: .stripMoveLeft)) }
+                LabeledContent("这一列右移") { ShortcutRecorder(shortcut: shortcut(for: .stripMoveRight)) }
             }
         } header: {
             Text("卷轴")
         } footer: {
-            Text("点菜单栏图标里的“卷轴”（或按快捷键），当前屏幕上的窗口排成一条横着的卷轴：每列整屏高，宽度取三分之一、一半、三分之二或整屏；放不下的列停在屏幕外，只在边上露一条。卷轴开着时，左下角有一块和 Dock 一样高的滚动条：按住拖动，或在上面直接滚滚轮（不用按 Shift），整条卷轴平滑地跟着走。在卷轴里的窗口标题栏上两指左右滑也行，松手带惯性停到最近的一列；标题栏上横向滚轮一格走一列。指针停在露出来的那条上看一眼那扇窗口，点那条就滑过去；两指张开进概览，点哪扇就滑到哪一列。再点一次“卷轴”（或再按快捷键），窗口回到原处。")
+            Text("点菜单栏图标里的“卷轴”（或按快捷键），当前屏幕上的窗口排成一条横着的卷轴：每列整屏高，宽度取三分之一、一半、三分之二或整屏；放不下的列停在屏幕外，只在边上露一条。卷轴开着时，指针停在任意一列的标题栏上滚动滚轮（或两指滑动），整条卷轴平滑地跟着走，方向和灵敏度在上面调；左下角那块和 Dock 一样高的滚动条也可以拖或滚。默认滚到哪停在哪，打开“停下时对齐到列”就会停到最近一列的边上。拖着某一列的标题栏左右移动，松手就把它插到预览写着“放到这里”的位置；快捷键也能把当前窗口那一列左移或右移（只在卷轴开着时生效）。指针停在露出来的那条上看一眼那扇窗口，点那条就滑过去；两指张开进概览，点哪扇就滑到哪一列。再点一次“卷轴”（或再按快捷键），窗口回到原处。")
                 .font(.caption).foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
         }

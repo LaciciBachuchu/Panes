@@ -32,6 +32,9 @@ final class WindowManager {
         case .scrollStrip:
             ScrollStrip.shared.toggle()
             return
+        case .stripMoveLeft, .stripMoveRight:
+            ScrollStrip.shared.moveFocusedColumn(action.kind == .stripMoveLeft ? -1 : 1)
+            return
         default:
             break
         }
@@ -158,7 +161,7 @@ final class WindowManager {
             r = r.intersection(vf)
             return r
 
-        case .showPalette, .rollUp, .pin, .magicTiling, .carry, .slideOver, .scrollStrip:
+        case .showPalette, .rollUp, .pin, .magicTiling, .carry, .slideOver, .scrollStrip, .stripMoveLeft, .stripMoveRight:
             return nil
         }
     }

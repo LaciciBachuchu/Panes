@@ -88,7 +88,7 @@ final class TitlebarGestures {
     // MARK: Scroll events
 
     private func scroll(_ e: NSEvent) {
-        Debug.log("scroll phase=\(e.phase.rawValue) momentum=\(e.momentumPhase.rawValue) precise=\(e.hasPreciseScrollingDeltas) d=(\(e.scrollingDeltaX),\(e.scrollingDeltaY))")
+        if ScrollStrip.shared.isActive, routeToStrip(e) { return }
         guard e.momentumPhase.isEmpty else { return }
         if e.phase.isEmpty {
             if settings.scrollWheelGesturesEnabled, !e.hasPreciseScrollingDeltas { wheelNotch(e) }
@@ -131,6 +131,50 @@ final class TitlebarGestures {
         } else if e.phase.contains(.cancelled) {
             cancelTrack()
         }
+    }
+
+    // MARK: Scroll strip
+
+    /// A trackpad gesture (and its momentum) that started over a strip column's title bar.
+    private var stripGesture = false
+    private var stripHitCache: (time: Date, point: CGPoint, hit: Bool)?
+    private var stripSettle: DispatchWorkItem?
+
+    /// Is the pointer on the title bar of a column in the scroll strip? Cached briefly:
+    /// a wheel spin sends many events from the same spot.
+    private func pointerOnStripTitlebar() -> Bool {
+        let p = Geometry.mouseAX
+        if let c = stripHitCache, Date().timeIntervalSince(c.time) < 0.25, hypot(c.point.x - p.x, c.point.y - p.y) < 12 { return c.hit }
+        // The strip placed these windows itself, so geometry is enough — no asking the app.
+        let hit = ScrollStrip.shared.pointerOnColumnTitlebar(p)
+        stripHitCache = (Date(), p, hit)
+        return hit
+    }
+
+    /// While a strip is on, scrolling over a column's title bar scrolls the strip —
+    /// wheel or trackpad, either axis, with the user's direction and speed. Returns
+    /// whether the event was taken.
+    private func routeToStrip(_ e: NSEvent) -> Bool {
+        let fingers = !e.phase.isEmpty || !e.momentumPhase.isEmpty
+        if fingers {
+            if e.phase.contains(.began) || e.phase.contains(.mayBegin) { stripGesture = pointerOnStripTitlebar() }
+            guard stripGesture else { return false }
+        } else {
+            guard pointerOnStripTitlebar() else { return false }
+        }
+        let delta = abs(e.scrollingDeltaY) >= abs(e.scrollingDeltaX) ? e.scrollingDeltaY : e.scrollingDeltaX
+        if delta != 0 { ScrollStrip.shared.titlebarScroll(delta, precise: e.hasPreciseScrollingDeltas) }
+        if e.hasPreciseScrollingDeltas {
+            // Fingers and momentum have no reliable "last event": settle when they go quiet.
+            stripSettle?.cancel()
+            let w = DispatchWorkItem { [weak self] in
+                self?.stripGesture = false
+                ScrollStrip.shared.settle()
+            }
+            stripSettle = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: w)
+        }
+        return true
     }
 
     /// A gesture starts: is the pointer on a title bar we may act on?
@@ -268,11 +312,6 @@ final class TitlebarGestures {
         // Line-based wheel events: one line per notch, more when the wheel spins fast.
         let notches = max(1, Int(max(abs(dx), abs(dy)).rounded()))
         let now = Date()
-        if dir.horizontal, ScrollStrip.shared.isActive, Titlebar.mayBeTitlebar(Geometry.mouseAX),
-           let hit = Titlebar.hit(at: Geometry.mouseAX, allowControls: true), ScrollStrip.shared.contains(hit.window) {
-            for _ in 0..<notches { ScrollStrip.shared.step(dir == .right ? -1 : 1) }
-            return
-        }
         if var w = wheel, now.timeIntervalSince(w.last) < 0.6, w.dir == dir {
             w.last = now
             guard let win = w.window, !(dir.horizontal && w.owned) else { wheel = w; return }

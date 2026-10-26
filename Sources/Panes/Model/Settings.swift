@@ -47,6 +47,9 @@ struct SettingsData: Codable {
 
     // Scroll strip
     var scrollStripEnabled = false
+    var stripReverseScroll = false
+    var stripScrollSpeed: Double = 1.0
+    var stripSnapToColumns = false
 
     // Slide Over (experimental: off until the float-in-front hand-off works)
     var slideOverEnabled = false
@@ -78,6 +81,7 @@ struct SettingsData: Codable {
         d(.flingEnabled, &flingEnabled); d(.carryEnabled, &carryEnabled)
         d(.slideOverEnabled, &slideOverEnabled); d(.slideOverDwell, &slideOverDwell)
         d(.splitDividersEnabled, &splitDividersEnabled); d(.scrollStripEnabled, &scrollStripEnabled)
+        d(.stripReverseScroll, &stripReverseScroll); d(.stripScrollSpeed, &stripScrollSpeed); d(.stripSnapToColumns, &stripSnapToColumns)
         actions.removeAll { $0.kind.isRemoved }
         // Default names were English before the menu went Chinese; renamed ones stay.
         for i in actions.indices { if let zh = Defaults.chineseNames[actions[i].name] { actions[i].name = zh } }
@@ -118,6 +122,8 @@ final class Settings: ObservableObject {
         case .carry: return data.carryEnabled
         case .slideOver: return data.slideOverEnabled
         case .scrollStrip: return data.scrollStripEnabled
+        // Only while a strip is on, so the arrows stay free the rest of the time.
+        case .stripMoveLeft, .stripMoveRight: return data.scrollStripEnabled && ScrollStrip.shared.isActive
         default: return true
         }
     }
@@ -154,10 +160,17 @@ enum Defaults {
         "Center": "居中", "Restore": "还原", "Larger": "放大", "Smaller": "缩小",
         "Next Display": "移到下一个显示器", "Previous Display": "移到上一个显示器",
         "Show Palette": "显示面板", "Roll Up": "卷起", "Carry to Every Space": "带到每张桌面", "Slide Over": "侧拉", "Scroll Strip": "卷轴",
+        "Strip: Move Column Left": "卷轴：这一列左移", "Strip: Move Column Right": "卷轴：这一列右移",
     ]
 
     static var actions: [WindowAction] {
-        englishActions.map { a in var a = a; a.name = chineseNames[a.name] ?? a.name; return a }
+        englishActions.map { a in
+            var a = a
+            a.name = chineseNames[a.name] ?? a.name
+            // The strip has its own menu item; its column moves only make sense inside it.
+            if [.scrollStrip, .stripMoveLeft, .stripMoveRight].contains(a.kind) { a.inMenu = false }
+            return a
+        }
     }
 
     private static var englishActions: [WindowAction] {
@@ -196,6 +209,8 @@ enum Defaults {
             k("Carry to Every Space", .carry, Shortcut(kVK_ANSI_G, Shortcut.ctrlOptShift)),
             k("Slide Over", .slideOver, Shortcut(kVK_ANSI_S, Shortcut.ctrlOptShift)),
             k("Scroll Strip", .scrollStrip, Shortcut(kVK_ANSI_R, Shortcut.ctrlOptShift)),
+            k("Strip: Move Column Left", .stripMoveLeft, Shortcut(kVK_LeftArrow, Shortcut.ctrlOptShift)),
+            k("Strip: Move Column Right", .stripMoveRight, Shortcut(kVK_RightArrow, Shortcut.ctrlOptShift)),
         ]
     }
 

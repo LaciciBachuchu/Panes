@@ -84,3 +84,28 @@ final class LiveWindowStream: NSObject, SCStreamOutput, SCStreamDelegate {
         Debug.log("livestream stopped: \(error)")
     }
 }
+
+/// The desktop picture of a screen as currently drawn (the Dock's desktop window),
+/// for backdrops that should look like "nothing but the desktop is here".
+enum DesktopBackdrop {
+    static func image(for screen: NSScreen) -> CGImage? {
+        let level = Int(CGWindowLevelForKey(.desktopWindow))
+        let frame = screen.axFrame
+        if WindowCapture.hasPermission,
+           let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] {
+            for info in list {
+                guard (info[kCGWindowLayer as String] as? Int) == level,
+                      let id = info[kCGWindowNumber as String] as? CGWindowID,
+                      let b = info[kCGWindowBounds as String] as? NSDictionary,
+                      let r = CGRect(dictionaryRepresentation: b), r.roughlyEquals(frame, tolerance: 2) else { continue }
+                if let img = CGWindowListCreateImage(frame, .optionIncludingWindow, id, [.bestResolution]) { return img }
+            }
+        }
+        // Fall back to the wallpaper file (a dynamic wallpaper shows its default frame).
+        if let url = NSWorkspace.shared.desktopImageURL(for: screen), let img = NSImage(contentsOf: url) {
+            var rect = CGRect(origin: .zero, size: img.size)
+            return img.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+        }
+        return nil
+    }
+}

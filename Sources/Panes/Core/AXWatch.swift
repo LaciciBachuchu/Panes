@@ -22,6 +22,13 @@ final class AXWatch {
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .defaultMode)
     }
 
+    /// Also listen on one element (a window): some notifications, like a window
+    /// being destroyed, are only sent to the element itself, not its app.
+    func add(_ element: AXUIElement, _ notification: String) {
+        guard let observer else { return }
+        AXObserverAddNotification(observer, element, notification as CFString, Unmanaged.passUnretained(self).toOpaque())
+    }
+
     deinit {
         if let observer { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode) }
     }
