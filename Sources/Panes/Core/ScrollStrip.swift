@@ -766,10 +766,12 @@ final class ScrollStrip {
             }
         }
         o.onDismiss = { [weak self, weak o] in
+            // Held until it's closed: AppKit keeps a panel on screen after its owner lets go.
+            guard let o else { return }
             self?.afterStow {
                 self?.applyFrames()
                 self?.overview = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { o?.close() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { o.close() }
             }
         }
         overview = o
@@ -971,6 +973,9 @@ final class StripOverview: NSObject {
         panel.orderOut(nil)
     }
 
+    // Whatever path lets go of it, the panel must not stay behind on screen.
+    deinit { close() }
+
     private final class OverviewView: NSView {
         var onClick: (CGPoint) -> Void = { _ in }
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -1077,6 +1082,7 @@ final class StripProxy {
 
     func show() { panel.orderFrontRegardless() }
     func close() { panel.orderOut(nil) }
+    deinit { panel.orderOut(nil) }
 }
 
 /// The scroll pad: a strip-shaped map at the bottom left, as tall as the Dock.
