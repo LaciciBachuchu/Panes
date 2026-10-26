@@ -38,7 +38,6 @@ final class ScrollStrip {
     private var watchers: [pid_t: AXWatch] = [:]
     /// A column that left (minimized, put away): the column it sat after (0 = first).
     private var returnAfter: [CGWindowID: CGWindowID] = [:]
-    private var monitors: [Any] = []
     /// Closing a window often only orders it out, with no notice: look twice a second.
     private var goneCheck: Timer?
     private var activationObserver: Any?
@@ -127,7 +126,10 @@ final class ScrollStrip {
         installMonitors()
         // The pictures from before were at the windows' old sizes: retake them once
         // the apps have laid out at their column sizes.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refreshSnapshots() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.refreshSnapshots()
+            self?.warmIcons()
+        }
         let p = ScrollPad(screen: s)
         p.layout = { [weak self] in self?.padModel() ?? ([], 0, 1) }
         p.onDrag = { [weak self] dx in self?.padDragged(dx) }
@@ -179,6 +181,7 @@ final class ScrollStrip {
         returnAfter = [:]
         adoptWork?.cancel()
         resizeWork?.cancel()
+        iconCache = [:]
         removeMonitors()
         ParkedJournal.clear("strip")
         HotKeyManager.shared.reload()
@@ -295,6 +298,7 @@ final class ScrollStrip {
     private func applyFrames() {
         _ = moving?.wait(timeout: .now() + 0.3)
         for i in columns.indices { columns[i].window.setFrameUnclamped(frame(of: i, at: offset)) }
+        updateEdgeSensors()
     }
 
     /// Positions only (cheap), coalesced to once per runloop pass, while scrolling.
@@ -459,8 +463,9 @@ final class ScrollStrip {
         p.layout(trueFrames())
         p.show()
         proxy = p
-        // Once the pictures are up, the real windows step out from under them.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self, weak p] in
+        // Once the pictures are on screen (one frame), the real windows step out from under them.
+        CATransaction.flush()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { [weak self, weak p] in
             guard let self, let p, self.proxy === p else { return }
             self.stowWindows(done: {})
         }
@@ -524,7 +529,10 @@ final class ScrollStrip {
 
     /// Every column's window to its place at the current offset, all at once.
     private func placeWindows(done: @escaping () -> Void = {}) {
-        move(columns.indices.map { (columns[$0].window, frame(of: $0, at: offset).origin) }, done: done)
+        move(columns.indices.map { (columns[$0].window, frame(of: $0, at: offset).origin) }) { [weak self] in
+            self?.updateEdgeSensors()
+            done()
+        }
     }
 
     private func render() {
@@ -549,27 +557,40 @@ final class ScrollStrip {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 guard let self, self.isActive, self.proxy == nil, self.overview == nil else { return }
                 self.fitColumnsToWindows()
-                self.refreshSnapshots()
+                self.refreshSnapshots(visibleOnly: true)
             }
         }
     }
 
-    /// Columns at least half on screen: a parked window's picture would come out blank.
-    private func mostlyVisibleColumns() -> [CGWindowID] {
-        trueFrames().filter { _, f in
-            let v = f.intersection(area)
-            return !v.isNull && v.width >= f.width * 0.5
-        }.map(\.0)
-    }
-
-    /// Fresh pictures of every column, taken off the main thread.
-    /// Every column, parked ones too, as it looks now at its column size.
-    private func refreshSnapshots() {
+    /// Columns as they look now at their column size: every one (parked ones too),
+    /// or after a stop only those you can see — the parked ones haven't been looked at.
+    private func refreshSnapshots(visibleOnly: Bool = false, done: (([CGWindowID: CGImage]) -> Void)? = nil) {
         guard isActive, WindowCapture.hasPermission else { return }
-        WindowCapture.capture(columns.map(\.id)) { [weak self] shots in
+        let ids = visibleOnly ? trueFrames().filter { $0.1.intersects(area) }.map(\.0) : columns.map(\.id)
+        WindowCapture.capture(ids) { [weak self] shots in
             guard let self, self.isActive else { return }
             self.snapshots.merge(shots) { $1 }
+            done?(shots)
         }
+    }
+
+    /// App icons, rendered once per app (the overview shows them every time).
+    private var iconCache: [pid_t: CGImage] = [:]
+
+    /// Rendering an icon the first time is slow (a third of a second for a few apps):
+    /// do it ahead, not when ⌃↑ is pressed.
+    private func warmIcons() {
+        for c in columns where iconCache[c.window.pid] == nil { _ = icon(for: c.window.pid) }
+    }
+
+    private func icon(for pid: pid_t) -> CGImage? {
+        if let i = iconCache[pid] { return i }
+        guard let icon = NSRunningApplication(processIdentifier: pid)?.icon else { return nil }
+        // Big enough for a 48pt badge's artwork at 2x (the artwork is 824/1024 of it).
+        var rect = CGRect(x: 0, y: 0, width: 120, height: 120)
+        let img = icon.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+        iconCache[pid] = img
+        return img
     }
 
     // MARK: Following the windows
@@ -581,7 +602,8 @@ final class ScrollStrip {
     private func watch(_ c: Column) {
         let pid = c.window.pid
         if watchers[pid] == nil {
-            watchers[pid] = AXWatch(pid: pid, notifications: [kAXWindowCreatedNotification, kAXWindowDeminiaturizedNotification]) { [weak self] note in
+            watchers[pid] = AXWatch(pid: pid, notifications: [kAXWindowCreatedNotification, kAXWindowDeminiaturizedNotification,
+                                                              kAXFocusedWindowChangedNotification]) { [weak self] note in
                 self?.windowEvent(note)
             }
         }
@@ -599,6 +621,9 @@ final class ScrollStrip {
         case kAXWindowResizedNotification:
             windowResized()
         default:
+            // Destroyed, minimized, or focus moved on (a window that was only ordered
+            // out on close lets focus go). Mid-move the slow look catches it later.
+            guard proxy == nil, overview == nil, moving == nil else { return }
             dropGoneColumns()
         }
     }
@@ -689,6 +714,7 @@ final class ScrollStrip {
         applyFrames()
         fitColumnsToWindows()
         if let lastID { scroll(toColumnOf: lastID) }
+        warmIcons()
         Debug.log("strip: adopted \(fresh.count) new window(s), now \(columns.count) columns")
     }
 
@@ -717,18 +743,14 @@ final class ScrollStrip {
     /// While the strip is on: switching to a parked window scrolls it into view;
     /// resting on a sliver peeks; clicking a sliver scrolls to it.
     private func installMonitors() {
-        guard monitors.isEmpty else { return }
+        guard goneCheck == nil else { return }
         // A closed window leaves the strip and its neighbours close the gap, each
         // keeping its own width. Not mid-move: the windows are stepped aside then.
-        goneCheck = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        // Mostly the windows' own notices (destroyed, minimized, focus moving on) say
+        // when one may have left; this slow look catches anything they miss.
+        goneCheck = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             guard let self, self.proxy == nil, self.overview == nil, self.moving == nil else { return }
             self.dropGoneColumns()
-        }
-        if let m = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved, handler: { [weak self] _ in self?.pointerMoved() }) {
-            monitors.append(m)
-        }
-        if let m = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown, handler: { [weak self] _ in self?.pointerClicked() }) {
-            monitors.append(m)
         }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
@@ -745,8 +767,8 @@ final class ScrollStrip {
     private func removeMonitors() {
         goneCheck?.invalidate()
         goneCheck = nil
-        monitors.forEach(NSEvent.removeMonitor)
-        monitors.removeAll()
+        edgeSensors.forEach { $0.orderOut(nil) }
+        edgeSensors = []
         if let o = activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
         activationObserver = nil
     }
@@ -762,26 +784,50 @@ final class ScrollStrip {
         return parked.filter { area.minX + start(of: $0) - offset >= area.maxX - Self.sliver }.first
     }
 
-    private func pointerMoved() {
-        let p = Geometry.mouseAX
-        if p.x - area.minX < 14 || area.maxX - p.x < 14 { Debug.log("strip: pointer at edge \(p) sliver=\(String(describing: sliverColumn(at: p)))") }
-        guard let i = sliverColumn(at: p) else {
-            peekWork?.cancel()
-            closePeek()
-            return
+    // MARK: Edges
+
+    /// One sensor per screen edge, up only while a column is parked on that side.
+    private var edgeSensors: [EdgeSensor] = []
+
+    /// The pointer resting on a parked column's sliver peeks at it, a click there
+    /// scrolls to it. Sensors over just those slivers wake the strip only at the
+    /// edges, instead of it watching every mouse move system-wide.
+    private func updateEdgeSensors() {
+        guard isActive else { return }
+        if edgeSensors.isEmpty {
+            for left in [true, false] {
+                let x = left ? area.minX : area.maxX - Self.sliver
+                let s = EdgeSensor(frame: Geometry.cocoaRect(fromAX: CGRect(x: x, y: area.minY, width: Self.sliver, height: area.height)))
+                s.onEnter = { [weak self] in self?.edgeEntered(left: left) }
+                s.onExit = { [weak self] in self?.closePeek() }
+                s.onClick = { [weak self] in self?.edgeClicked(left: left) }
+                edgeSensors.append(s)
+            }
         }
-        guard peek?.windowID != columns[i].id, peekWork == nil || peekWork!.isCancelled else { return }
-        let id = columns[i].id
+        for (k, left) in [true, false].enumerated() {
+            if parkedColumn(left: left) != nil { edgeSensors[k].orderFrontRegardless() } else { edgeSensors[k].orderOut(nil) }
+        }
+    }
+
+    /// The parked column nearest the screen on that side.
+    private func parkedColumn(left: Bool) -> Int? {
+        let parked = columns.indices.filter { isParked($0, at: offset) }
+        if left { return parked.filter { area.minX + start(of: $0) - offset < area.minX }.last }
+        return parked.filter { area.minX + start(of: $0) - offset >= area.maxX - Self.sliver }.first
+    }
+
+    private func edgeEntered(left: Bool) {
+        peekWork?.cancel()
         let w = DispatchWorkItem { [weak self] in
-            guard let self, let j = self.sliverColumn(at: Geometry.mouseAX), self.columns[j].id == id else { return }
-            self.showPeek(j, pointer: Geometry.mouseAX)
+            guard let self, let i = self.parkedColumn(left: left) else { return }
+            self.showPeek(i, pointer: Geometry.mouseAX)
         }
         peekWork = w
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: w)
     }
 
-    private func pointerClicked() {
-        guard let i = sliverColumn(at: Geometry.mouseAX) else { return }
+    private func edgeClicked(left: Bool) {
+        guard let i = parkedColumn(left: left) else { return }
         closePeek()
         scroll(toColumnOf: columns[i].id)
     }
@@ -867,17 +913,18 @@ final class ScrollStrip {
     /// zooms back in onto that window's column.
     func showOverview() {
         guard isActive, overview == nil else { return }
+        let asked = Date()
         animation?.invalidate()
         proxy?.close(); proxy = nil
         closePeek()
         dropGoneColumns()
         guard isActive else { return }
-        // Retake what's on screen right now, so the tiles you're looking at are current.
-        for id in mostlyVisibleColumns() { if let img = WindowCapture.snapshot(id) { snapshots[id] = img } }
+        // The pictures in hand (retaken after every stop) open it at once; fresh ones
+        // are taken in the background and swapped in.
         let images = snapshots
         Debug.log("strip: overview with pictures for \(columns.filter { images[$0.id] != nil }.count)/\(columns.count); missing \(columns.filter { images[$0.id] == nil }.map { $0.window.bundleID ?? "?" })")
-        var icons: [CGWindowID: NSImage] = [:]
-        for c in columns { icons[c.id] = NSRunningApplication(processIdentifier: c.window.pid)?.icon }
+        var icons: [CGWindowID: CGImage] = [:]
+        for c in columns { icons[c.id] = icon(for: c.window.pid) }
         let o = StripOverview(area: area, images: images, icons: icons,
                               now: trueFrames(), overview: overviewFrames())
         o.onPick = { [weak self, weak o] id in
@@ -907,10 +954,15 @@ final class ScrollStrip {
         // The tiles go up exactly over the windows; the windows step out from under
         // them, and only then does the view pull back, so no real window shows behind.
         o.show()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self, weak o] in
+        CATransaction.flush()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { [weak self, weak o] in
             guard let self, let o, self.overview === o else { return }
-            self.stowWindows { o.present() }
+            self.stowWindows {
+                Debug.log("strip: overview moving \(Int(Date().timeIntervalSince(asked) * 1000))ms after ⌃↑")
+                o.present()
+            }
         }
+        refreshSnapshots { [weak o] shots in o?.update(images: shots) }
     }
 
     /// Offset that brings a column fully into view with the least movement.
@@ -958,12 +1010,10 @@ final class StripOverview: NSObject {
     private var busy = false
     /// Share of an app icon's canvas the artwork takes (824 of 1024).
     private static let iconArtwork: CGFloat = 824.0 / 1024
-    static var duration: CFTimeInterval {
-        let d = UserDefaults.standard.double(forKey: "PanesOverviewDuration")   // debug override
-        return d > 0 ? d : 0.65
-    }
+    /// The zoom's length, from Settings (卷轴 → 预览动画时长).
+    static var duration: CFTimeInterval { max(0.1, Settings.shared.data.stripOverviewDuration) }
 
-    init(area: CGRect, images: [CGWindowID: CGImage], icons: [CGWindowID: NSImage],
+    init(area: CGRect, images: [CGWindowID: CGImage], icons: [CGWindowID: CGImage],
          now: [(CGWindowID, CGRect)], overview: [(CGWindowID, CGRect)]) {
         self.area = area
         self.now = now
@@ -1000,7 +1050,6 @@ final class StripOverview: NSObject {
         }
         // One row of icons, all the same size, a little below the lowest tile, so a
         // short window's icon lines up with the rest instead of hugging its edge.
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
         let side = min(48, max(24, (overview.map(\.1.width).min() ?? 48) - 8))
         let row = (overview.map(\.1.maxY).max() ?? area.midY) + 6
         for (id, f) in overview {
@@ -1008,10 +1057,8 @@ final class StripOverview: NSObject {
             // The icon artwork is the 824-pt rounded square in a 1024 canvas; macOS bakes
             // a soft shadow into the margin around it. Show the artwork only, clipped to
             // its own corner radius, so no dark rim shows on the wallpaper.
-            let canvas = side / Self.iconArtwork
-            var rect = CGRect(x: 0, y: 0, width: canvas * scale, height: canvas * scale)
             let b = CALayer()
-            b.contents = icon.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+            b.contents = icon
             let m = (1 - Self.iconArtwork) / 2
             b.contentsRect = CGRect(x: m, y: m, width: Self.iconArtwork, height: Self.iconArtwork)
             b.cornerRadius = side * 185.0 / 824
@@ -1027,6 +1074,14 @@ final class StripOverview: NSObject {
     }
 
     private func local(_ ax: CGRect) -> CGRect { StripProxy.local(ax, in: area) }
+
+    /// Fresher pictures arrived: swap them in without disturbing any animation.
+    func update(images: [CGWindowID: CGImage]) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (id, img) in images { tiles[id]?.contents = img }
+        CATransaction.commit()
+    }
 
     /// Up over the windows, tiles exactly where the windows are: nothing changes yet.
     func show() { panel.orderFrontRegardless() }
@@ -1226,6 +1281,41 @@ final class StripProxy {
     func show() { panel.orderFrontRegardless() }
     func close() { panel.orderOut(nil) }
     deinit { panel.orderOut(nil) }
+}
+
+/// An invisible strip over one screen edge's sliver (see ScrollStrip.updateEdgeSensors):
+/// the pointer arriving or leaving, and clicks, without a system-wide mouse monitor.
+final class EdgeSensor: NSPanel {
+    var onEnter: () -> Void = {}
+    var onExit: () -> Void = {}
+    var onClick: () -> Void = {}
+
+    init(frame: CGRect) {
+        super.init(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        isOpaque = false
+        // A trace of colour: fully clear pixels let the pointer through.
+        backgroundColor = NSColor.black.withAlphaComponent(0.01)
+        hasShadow = false
+        level = .floating
+        animationBehavior = .none
+        collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle, .transient]
+        let v = SensorView(frame: CGRect(origin: .zero, size: frame.size))
+        v.owner = self
+        contentView = v
+    }
+
+    private final class SensorView: NSView {
+        weak var owner: EdgeSensor?
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func mouseEntered(with event: NSEvent) { owner?.onEnter() }
+        override func mouseExited(with event: NSEvent) { owner?.onExit() }
+        override func mouseDown(with event: NSEvent) { owner?.onClick() }
+    }
 }
 
 /// The scroll pad: a strip-shaped map at the bottom left, as tall as the Dock.

@@ -53,6 +53,12 @@ struct FeaturesTab: View {
                     }
                 }
                 Toggle("停下时对齐到列", isOn: $settings.data.stripSnapToColumns)
+                LabeledContent("预览动画时长") {
+                    HStack {
+                        Slider(value: $settings.data.stripOverviewDuration, in: 0.15...1.2)
+                        Text(String(format: "%.2f 秒", settings.data.stripOverviewDuration)).monospacedDigit().frame(width: 60)
+                    }
+                }
                 LabeledContent("这一列左移") { ShortcutRecorder(shortcut: shortcut(for: .stripMoveLeft)) }
                 LabeledContent("这一列右移") { ShortcutRecorder(shortcut: shortcut(for: .stripMoveRight)) }
             }
