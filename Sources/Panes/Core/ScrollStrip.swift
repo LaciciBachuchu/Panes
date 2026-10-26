@@ -37,6 +37,8 @@ final class ScrollStrip {
     private var animation: Timer?
     private var watchers: [pid_t: AXWatch] = [:]
     private var monitors: [Any] = []
+    /// Closing a window often only orders it out, with no notice: look twice a second.
+    private var goneCheck: Timer?
     private var activationObserver: Any?
     private var peek: PeekCard?
     private var peekWork: DispatchWorkItem?
@@ -119,7 +121,9 @@ final class ScrollStrip {
         fitColumnsToWindows()
         for c in columns { watch(c) }
         installMonitors()
-        refreshSnapshots()
+        // The pictures from before were at the windows' old sizes: retake them once
+        // the apps have laid out at their column sizes.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refreshSnapshots() }
         let p = ScrollPad(screen: s)
         p.layout = { [weak self] in self?.padModel() ?? ([], 0, 1) }
         p.onDrag = { [weak self] dx in self?.padDragged(dx) }
@@ -489,13 +493,12 @@ final class ScrollStrip {
     }
 
     /// Fresh pictures of every column, taken off the main thread.
+    /// Every column, parked ones too, as it looks now at its column size.
     private func refreshSnapshots() {
         guard isActive, WindowCapture.hasPermission else { return }
-        let ids = mostlyVisibleColumns()
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            var shots: [CGWindowID: CGImage] = [:]
-            for id in ids { if let img = WindowCapture.snapshot(id) { shots[id] = img } }
-            DispatchQueue.main.async { self?.snapshots.merge(shots) { $1 } }
+        WindowCapture.capture(columns.map(\.id)) { [weak self] shots in
+            guard let self, self.isActive else { return }
+            self.snapshots.merge(shots) { $1 }
         }
     }
 
@@ -526,8 +529,21 @@ final class ScrollStrip {
     }
 
     /// Closed or minimized windows give up their place.
+    /// Columns whose window left: closed, minimized, or put away — many apps only
+    /// order a window out when it's closed, with no destroyed notice. When none of
+    /// them is on screen, it's a switch to another Space, not windows leaving.
+    private func goneColumns() -> [CGWindowID] {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        let onScreen = Set(list.compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        let off = columns.filter { !onScreen.contains($0.id) }.map(\.id)
+        let away = off.count == columns.count ? [] : off
+        // Only window-server lookups here (it runs twice a second): a minimized window
+        // is off screen too, and a destroyed one has no frame left.
+        return columns.filter { away.contains($0.id) || AXWindow.serverFrame(of: $0.id) == nil }.map(\.id)
+    }
+
     private func dropGoneColumns() {
-        let gone = columns.filter { AXWindow.serverFrame(of: $0.id) == nil || $0.window.isMinimized }.map(\.id)
+        let gone = goneColumns()
         guard !gone.isEmpty else { return }
         Debug.log("strip: dropping \(gone) (closed or minimized)")
         // A minimized window gets its own frame back now, so it unminimizes where it was.
@@ -597,6 +613,12 @@ final class ScrollStrip {
     /// resting on a sliver peeks; clicking a sliver scrolls to it.
     private func installMonitors() {
         guard monitors.isEmpty else { return }
+        // A closed window leaves the strip and its neighbours close the gap, each
+        // keeping its own width. Not mid-move: the windows are stepped aside then.
+        goneCheck = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self, self.proxy == nil, self.overview == nil, self.stowing == nil else { return }
+            self.dropGoneColumns()
+        }
         if let m = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved, handler: { [weak self] _ in self?.pointerMoved() }) {
             monitors.append(m)
         }
@@ -616,6 +638,8 @@ final class ScrollStrip {
     }
 
     private func removeMonitors() {
+        goneCheck?.invalidate()
+        goneCheck = nil
         monitors.forEach(NSEvent.removeMonitor)
         monitors.removeAll()
         if let o = activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
@@ -741,6 +765,8 @@ final class ScrollStrip {
         animation?.invalidate()
         proxy?.close(); proxy = nil
         closePeek()
+        dropGoneColumns()
+        guard isActive else { return }
         // Retake what's on screen right now, so the tiles you're looking at are current.
         for id in mostlyVisibleColumns() { if let img = WindowCapture.snapshot(id) { snapshots[id] = img } }
         let images = snapshots
@@ -867,15 +893,17 @@ final class StripOverview: NSObject {
             root.addSublayer(l)
             tiles[id] = l
         }
+        // One row of icons, all the same size, a little below the lowest tile, so a
+        // short window's icon lines up with the rest instead of hugging its edge.
         let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let row = (overview.map(\.1.maxY).max() ?? area.midY) + 12
+        let side = min(48, max(24, (overview.map(\.1.width).min() ?? 48) - 8))
         for (id, f) in overview {
             guard let icon = icons[id] else { continue }
-            let r = StripProxy.local(f, in: area)
-            let side = min(56, r.width * 0.4)
             var rect = CGRect(x: 0, y: 0, width: side * scale, height: side * scale)
             let b = CALayer()
             b.contents = icon.cgImage(forProposedRect: &rect, context: nil, hints: nil)
-            b.frame = CGRect(x: r.midX - side / 2, y: r.minY - side * 0.35, width: side, height: side)
+            b.frame = StripProxy.local(CGRect(x: f.midX - side / 2, y: row, width: side, height: side), in: area)
             b.shadowOpacity = 0.35
             b.shadowRadius = 6
             b.shadowOffset = CGSize(width: 0, height: -2)
@@ -895,7 +923,10 @@ final class StripOverview: NSObject {
     func present() {
         guard !dismissed else { return }
         panel.orderFrontRegardless()
-        animate(to: target) { [weak self] in self?.fadeBadges(to: 1, duration: 0.2) }
+        // Out: quick to leave, then easing gently into place.
+        animate(to: target, timing: CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)) { [weak self] in
+            self?.fadeBadges(to: 1, duration: 0.2)
+        }
         keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] e in
             if e.keyCode == 53 { self?.dismiss() }        // Esc
         }
@@ -913,10 +944,11 @@ final class StripOverview: NSObject {
     }
 
     /// Glide every tile to a state, explicitly.
-    private func animate(to frames: [(CGWindowID, CGRect)], done: @escaping () -> Void = {}) {
+    /// Default timing: a gentle start, then a long glide in, like a camera move.
+    private func animate(to frames: [(CGWindowID, CGRect)],
+                         timing: CAMediaTimingFunction = CAMediaTimingFunction(controlPoints: 0.45, 0, 0.15, 1),
+                         done: @escaping () -> Void = {}) {
         busy = true
-        // A gentle start, then a long glide in: the pull-back reads as a camera move.
-        let timing = CAMediaTimingFunction(controlPoints: 0.45, 0, 0.15, 1)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         CATransaction.setCompletionBlock { [weak self] in

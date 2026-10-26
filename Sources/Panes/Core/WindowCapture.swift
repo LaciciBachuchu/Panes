@@ -14,6 +14,37 @@ enum WindowCapture {
     /// Shows the system prompt once; afterwards the user grants it in Settings.
     static func requestPermission() { CGRequestScreenCaptureAccess() }
 
+    /// Pictures of windows wherever they are, parked past the screen edge too (where
+    /// CGWindowListCreateImage comes back blank or clipped). All at once; `done` gets
+    /// what came back, on the main thread.
+    static func capture(_ ids: [CGWindowID], done: @escaping ([CGWindowID: CGImage]) -> Void) {
+        guard hasPermission, !ids.isEmpty else { return done([:]) }
+        let wanted = Set(ids)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        Task {
+            var out: [CGWindowID: CGImage] = [:]
+            if let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) {
+                await withTaskGroup(of: (CGWindowID, CGImage?).self) { group in
+                    for w in content.windows where wanted.contains(w.windowID) {
+                        group.addTask {
+                            let config = SCStreamConfiguration()
+                            config.width = max(2, Int(w.frame.width * scale))
+                            config.height = max(2, Int(w.frame.height * scale))
+                            config.showsCursor = false
+                            config.ignoreShadowsSingleWindow = true
+                            let img = try? await SCScreenshotManager.captureImage(
+                                contentFilter: SCContentFilter(desktopIndependentWindow: w), configuration: config)
+                            return (w.windowID, img)
+                        }
+                    }
+                    for await (id, img) in group { if let img { out[id] = img } }
+                }
+            }
+            let result = out
+            await MainActor.run { done(result) }
+        }
+    }
+
     /// One still picture of a window, nil without permission.
     static func snapshot(_ id: CGWindowID) -> CGImage? {
         guard hasPermission else { return nil }
