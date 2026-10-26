@@ -36,6 +36,8 @@ final class ScrollStrip {
     private var pendingApply = false
     private var animation: Timer?
     private var watchers: [pid_t: AXWatch] = [:]
+    /// A column that left (minimized, put away): the column it sat after (0 = first).
+    private var returnAfter: [CGWindowID: CGWindowID] = [:]
     private var monitors: [Any] = []
     /// Closing a window often only orders it out, with no notice: look twice a second.
     private var goneCheck: Timer?
@@ -165,6 +167,7 @@ final class ScrollStrip {
         originals = [:]
         originalWindows = [:]
         watchers = [:]
+        returnAfter = [:]
         adoptWork?.cancel()
         removeMonitors()
         ParkedJournal.clear("strip")
@@ -312,7 +315,8 @@ final class ScrollStrip {
             self.animate(to: self.settledTarget(target))
         }
         wheelIdle = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: w)
+        // Hand-turned wheels pause between notches: keep moving through the pause.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: w)
     }
 
     /// One column left or right.
@@ -524,17 +528,19 @@ final class ScrollStrip {
     private func watch(_ c: Column) {
         let pid = c.window.pid
         if watchers[pid] == nil {
-            watchers[pid] = AXWatch(pid: pid, notifications: [kAXWindowCreatedNotification]) { [weak self] note in
+            watchers[pid] = AXWatch(pid: pid, notifications: [kAXWindowCreatedNotification, kAXWindowDeminiaturizedNotification]) { [weak self] note in
                 self?.windowEvent(note)
             }
         }
         watchers[pid]?.add(c.window.element, kAXUIElementDestroyedNotification)
         watchers[pid]?.add(c.window.element, kAXWindowMiniaturizedNotification)
+        watchers[pid]?.add(c.window.element, kAXWindowDeminiaturizedNotification)
     }
 
     private func windowEvent(_ note: String) {
         switch note {
-        case kAXWindowCreatedNotification:
+        case kAXWindowCreatedNotification, kAXWindowDeminiaturizedNotification:
+            // An un-minimized window comes back into the strip, where it was.
             adoptSoon()
         default:
             dropGoneColumns()
@@ -573,6 +579,11 @@ final class ScrollStrip {
         for id in gone {
             if let w = originalWindows[id], let f = originals[id], AXWindow.serverFrame(of: id) != nil { w.setFrame(f) }
         }
+        // Remember each one's left neighbour: un-minimized, it goes back there.
+        for id in gone {
+            guard let i = columns.firstIndex(where: { $0.id == id }) else { continue }
+            returnAfter[id] = columns[..<i].last { !gone.contains($0.id) }?.id ?? 0
+        }
         columns.removeAll { gone.contains($0.id) }
         if columns.isEmpty { exit(); return }
         offset = clamp(offset)
@@ -603,9 +614,16 @@ final class ScrollStrip {
             if WindowCapture.hasPermission, let img = WindowCapture.snapshot(id) { snapshots[id] = img }
             let share = Self.presets.min { abs($0 - f.width / area.width) < abs($1 - f.width / area.width) }!
             let c = Column(id: id, window: w, width: (area.width * share).rounded())
-            insertAt = min(insertAt, columns.count)
-            columns.insert(c, at: insertAt)
-            insertAt += 1
+            if let after = returnAfter.removeValue(forKey: id) {
+                // Back from the Dock: its old place, next to the column it sat after.
+                let at = after == 0 ? 0 : (columns.firstIndex { $0.id == after }.map { $0 + 1 } ?? min(insertAt, columns.count))
+                columns.insert(c, at: at)
+                if at < insertAt { insertAt += 1 }
+            } else {
+                insertAt = min(insertAt, columns.count)
+                columns.insert(c, at: insertAt)
+                insertAt += 1
+            }
             watch(c)
             lastID = id
         }
@@ -619,7 +637,13 @@ final class ScrollStrip {
     /// The pointer is in the top band (title bar) of a strip column that's on top
     /// there. Pure geometry from the window server: no app is asked anything.
     func pointerOnColumnTitlebar(_ p: CGPoint) -> Bool {
-        guard isActive, area.contains(p) || p.y >= area.minY - 2,
+        guard isActive else { return false }
+        // Mid-move the real windows are stepped aside and the pictures are what's
+        // under the pointer: test against where the pictures are.
+        if proxy != nil || moving != nil {
+            return trueFrames().contains { _, f in f.contains(p) && p.y - f.minY <= Titlebar.webTitlebarBand }
+        }
+        guard area.contains(p) || p.y >= area.minY - 2,
               let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
         let me = ProcessInfo.processInfo.processIdentifier
         for info in list {
@@ -874,6 +898,8 @@ final class StripOverview: NSObject {
     private let target: [(CGWindowID, CGRect)]
     private var keyMonitor: Any?
     private var busy = false
+    /// Share of an app icon's canvas the artwork takes (824 of 1024).
+    private static let iconArtwork: CGFloat = 824.0 / 1024
     static var duration: CFTimeInterval {
         let d = UserDefaults.standard.double(forKey: "PanesOverviewDuration")   // debug override
         return d > 0 ? d : 0.65
@@ -918,13 +944,21 @@ final class StripOverview: NSObject {
         // short window's icon lines up with the rest instead of hugging its edge.
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let side = min(48, max(24, (overview.map(\.1.width).min() ?? 48) - 8))
-        // Icon artwork leaves ~9% transparent margin; 6pt of visible gap under the tile.
-        let row = (overview.map(\.1.maxY).max() ?? area.midY) + 6 - side * 0.09
+        let row = (overview.map(\.1.maxY).max() ?? area.midY) + 6
         for (id, f) in overview {
             guard let icon = icons[id] else { continue }
-            var rect = CGRect(x: 0, y: 0, width: side * scale, height: side * scale)
+            // The icon artwork is the 824-pt rounded square in a 1024 canvas; macOS bakes
+            // a soft shadow into the margin around it. Show the artwork only, clipped to
+            // its own corner radius, so no dark rim shows on the wallpaper.
+            let canvas = side / Self.iconArtwork
+            var rect = CGRect(x: 0, y: 0, width: canvas * scale, height: canvas * scale)
             let b = CALayer()
             b.contents = icon.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+            let m = (1 - Self.iconArtwork) / 2
+            b.contentsRect = CGRect(x: m, y: m, width: Self.iconArtwork, height: Self.iconArtwork)
+            b.cornerRadius = side * 185.0 / 824
+            b.cornerCurve = .continuous
+            b.masksToBounds = true
             b.frame = StripProxy.local(CGRect(x: f.midX - side / 2, y: row, width: side, height: side), in: area)
             b.opacity = 0
             root.addSublayer(b)

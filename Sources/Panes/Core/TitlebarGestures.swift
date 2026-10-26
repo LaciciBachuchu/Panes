@@ -156,14 +156,23 @@ final class TitlebarGestures {
         let delta = abs(e.scrollingDeltaY) >= abs(e.scrollingDeltaX) ? e.scrollingDeltaY : e.scrollingDeltaX
         if delta != 0 { ScrollStrip.shared.titlebarScroll(delta, precise: e.hasPreciseScrollingDeltas) }
         if e.hasPreciseScrollingDeltas {
-            // Fingers and momentum have no reliable "last event": settle when they go quiet.
             stripSettle?.cancel()
             let w = DispatchWorkItem { [weak self] in
                 self?.stripGesture = false
                 ScrollStrip.shared.settle()
             }
             stripSettle = w
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: w)
+            // A real trackpad says when it's done: momentum ending is the end, and lifted
+            // fingers either start momentum within a few ms or that was the end.
+            // Smoothed wheels (Mos and the like post their own events) pause between
+            // flicks with no end marker: wait out the pause so the strip keeps moving.
+            let synthetic = e.cgEvent.map { $0.getIntegerValueField(.eventSourceUnixProcessID) != 0 } ?? false
+            let rest: TimeInterval
+            if synthetic || !fingers { rest = 0.3 }
+            else if e.momentumPhase.contains(.ended) { rest = 0 }
+            else if e.phase.contains(.ended) && e.momentumPhase.isEmpty { rest = 0.08 }
+            else { rest = 0.3 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + rest, execute: w)
         }
         return true
     }
