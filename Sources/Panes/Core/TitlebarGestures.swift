@@ -163,7 +163,7 @@ final class TitlebarGestures {
                 ScrollStrip.shared.settle()
             }
             stripSettle = w
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: w)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: w)
         }
         return true
     }
