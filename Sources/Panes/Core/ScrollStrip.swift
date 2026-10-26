@@ -178,6 +178,7 @@ final class ScrollStrip {
         watchers = [:]
         returnAfter = [:]
         adoptWork?.cancel()
+        resizeWork?.cancel()
         removeMonitors()
         ParkedJournal.clear("strip")
         HotKeyManager.shared.reload()
@@ -234,18 +235,55 @@ final class ScrollStrip {
     /// minimum sizes keep others wider than their slot. Read back what each one
     /// actually took and size its column to that, so neighbours never overlap and no
     /// picture is stretched or squeezed.
+    /// The same goes for a window you resize yourself: its column takes the new size
+    /// and the others move over, each keeping its own width.
     private func fitColumnsToWindows() {
         var changed = false
+        var widened: [(Int, CGFloat)] = []      // column, how far its left edge moved
+        let full = area.height - (gap > 0 ? 2 * gap : 0)      // a full-height slot (see slot(x:column:))
         for i in columns.indices {
             let want = frame(of: i, at: offset)
             guard let got = columns[i].window.frame else { continue }
-            if abs(got.width - want.width) > 3 { columns[i].width = got.width + gap; changed = true }
-            if got.height < want.height - 4 { columns[i].height = got.height; changed = true }
+            if abs(got.width - want.width) > 3 {
+                columns[i].width = got.width + gap
+                changed = true
+                if !isParked(i, at: offset) { widened.append((i, want.minX - got.minX)) }
+            }
+            if got.height < want.height - 4 {
+                columns[i].height = got.height
+                changed = true
+            } else if let h = columns[i].height, got.height > h + 4 {
+                // Made taller again: back to full height once it reaches it.
+                columns[i].height = got.height >= full - 4 ? nil : got.height
+                changed = true
+            }
         }
         if changed {
+            // One window resized from its left edge: it stays where it was put, and the
+            // strip shifts around it instead of pushing it back.
+            if widened.count == 1, abs(widened[0].1) > 3 { offset += widened[0].1 }
             offset = clamp(offset)
             applyFrames()
+            pad?.update(offset: offset)
         }
+    }
+
+    private var resizeWork: DispatchWorkItem?
+
+    /// A strip window was resized (by you, or an app): follow it once the drag is over.
+    private func windowResized() {
+        resizeWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in
+            guard let self, self.isActive else { return }
+            // Still dragging, or the strip is moving: look again shortly.
+            if NSEvent.pressedMouseButtons & 1 != 0 || self.proxy != nil || self.overview != nil || self.moving != nil {
+                self.windowResized()
+                return
+            }
+            self.fitColumnsToWindows()
+        }
+        resizeWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: w)
     }
 
     private func isParked(_ i: Int, at o: CGFloat) -> Bool {
@@ -550,6 +588,7 @@ final class ScrollStrip {
         watchers[pid]?.add(c.window.element, kAXUIElementDestroyedNotification)
         watchers[pid]?.add(c.window.element, kAXWindowMiniaturizedNotification)
         watchers[pid]?.add(c.window.element, kAXWindowDeminiaturizedNotification)
+        watchers[pid]?.add(c.window.element, kAXWindowResizedNotification)
     }
 
     private func windowEvent(_ note: String) {
@@ -557,12 +596,13 @@ final class ScrollStrip {
         case kAXWindowCreatedNotification, kAXWindowDeminiaturizedNotification:
             // An un-minimized window comes back into the strip, where it was.
             adoptSoon()
+        case kAXWindowResizedNotification:
+            windowResized()
         default:
             dropGoneColumns()
         }
     }
 
-    /// Closed or minimized windows give up their place.
     /// Columns whose window left: closed, minimized, or put away — many apps only
     /// order a window out when it's closed, with no destroyed notice. Off screen alone
     /// isn't enough: App Exposé and Mission Control take other apps' windows off screen
