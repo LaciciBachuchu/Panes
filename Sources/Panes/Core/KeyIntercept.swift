@@ -11,12 +11,20 @@ final class KeyIntercept {
     fileprivate let flags: CGEventFlags
     fileprivate let handler: () -> Void
     fileprivate var swallowUp = false
+    /// The last press was let through to the system (it opened Mission Control): the
+    /// next one goes through too, to close it. Esc or a click closes it instead and
+    /// clears this. Touched only on the tap's thread.
+    fileprivate var letThrough = false
+    /// Asked on the tap's thread at each press: false lets the combo through untouched.
+    fileprivate let when: () -> Bool
 
-    init?(keyCode: Int, flags: CGEventFlags, handler: @escaping () -> Void) {
+    init?(keyCode: Int, flags: CGEventFlags, when: @escaping () -> Bool = { true }, handler: @escaping () -> Void) {
         self.keyCode = Int64(keyCode)
         self.flags = flags
+        self.when = when
         self.handler = handler
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << CGEventType.keyUp.rawValue)
+            | CGEventMask(1 << CGEventType.leftMouseDown.rawValue) | CGEventMask(1 << CGEventType.rightMouseDown.rawValue)
         let ref = Unmanaged.passUnretained(self).toOpaque()
         // HID level: ahead of the system's own shortcut handling.
         guard let port = CGEvent.tapCreate(tap: .cghidEventTap, place: .headInsertEventTap, options: .defaultTap,
@@ -54,14 +62,27 @@ private func keyInterceptCallback(proxy: CGEventTapProxy, type: CGEventType, eve
         me.reenable()
         return Unmanaged.passUnretained(event)
     }
-    guard event.getIntegerValueField(.keyboardEventKeycode) == me.keyCode else { return Unmanaged.passUnretained(event) }
+    if type == .leftMouseDown || type == .rightMouseDown {
+        me.letThrough = false
+        return Unmanaged.passUnretained(event)
+    }
+    let code = event.getIntegerValueField(.keyboardEventKeycode)
+    if type == .keyDown && code == 53 { me.letThrough = false }      // Esc
+    guard code == me.keyCode else { return Unmanaged.passUnretained(event) }
     if type == .keyUp {
+        // A key-up whose key-down was swallowed is swallowed too, even if turned off since.
         if me.swallowUp { me.swallowUp = false; return nil }
         return Unmanaged.passUnretained(event)
     }
     // Exactly the wanted modifiers (arrow keys also carry fn / numeric-pad bits).
     let relevant: CGEventFlags = [.maskControl, .maskAlternate, .maskCommand, .maskShift]
     guard event.flags.intersection(relevant) == me.flags else { return Unmanaged.passUnretained(event) }
+    if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+        if me.letThrough { me.letThrough = false; return Unmanaged.passUnretained(event) }
+        if !me.when() { me.letThrough = true; return Unmanaged.passUnretained(event) }
+    } else if me.letThrough || !me.when() {
+        return Unmanaged.passUnretained(event)
+    }
     me.swallowUp = true
     if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
         let h = me.handler

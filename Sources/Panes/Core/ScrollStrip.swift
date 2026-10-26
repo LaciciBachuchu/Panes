@@ -112,8 +112,10 @@ final class ScrollStrip {
         if WindowCapture.hasPermission {
             for (id, _, _) in found { if let img = WindowCapture.snapshot(id) { snapshots[id] = img } }
         }
-        // Columns in their current left-to-right order; widths snap to the presets.
-        columns = found.sorted { $0.2.minX < $1.2.minX }.map { id, w, f in
+        // Columns in the order the windows were last used (the window server lists them
+        // front to back): the one in use on the left, then the one before it, and so
+        // on. Widths snap to the presets.
+        columns = found.map { id, w, f in
             let share = Self.presets.min { abs($0 - f.width / area.width) < abs($1 - f.width / area.width) }!
             return Column(id: id, window: w, width: (area.width * share).rounded())
         }
@@ -138,7 +140,14 @@ final class ScrollStrip {
         pad = p
         p.update(offset: offset)
         p.orderFrontRegardless()
-        missionControlKey = KeyIntercept(keyCode: 126, flags: .maskControl) { [weak self] in self?.toggleOverview() }
+        // Only on the strip's own Space: on another desktop or a full-screen app ⌃↑
+        // stays Mission Control. Asked at the press, by Space ID — Mission Control
+        // being open doesn't change it, so ⌃↑ still closes Mission Control there.
+        let display = Spaces.displayID(of: s), home = Spaces.current(on: display)
+        missionControlKey = KeyIntercept(keyCode: 126, flags: .maskControl,
+                                         when: { home == nil || Spaces.current(on: display) == home }) { [weak self] in
+            self?.toggleOverview()
+        }
         HotKeyManager.shared.reload()
         Debug.log("strip: \(columns.count) columns, total \(Int(totalWidth))pt")
         GestureHUD.shared.flash("卷轴：\(columns.count) 列", symbol: "rectangle.split.3x1", anchor: CGPoint(x: area.midX, y: area.minY + 40))
@@ -573,7 +582,8 @@ final class ScrollStrip {
             if listed[pid] == nil { listed[pid] = AXWindow.windowIDs(of: pid) }
             // No answer from the app: keep the window rather than guess.
             guard let ids = listed[pid] ?? nil else { return false }
-            return !ids.contains(c.id) || c.window.isMinimized
+            // Full screen is its own Space: it leaves, and rejoins when it comes back.
+            return !ids.contains(c.id) || c.window.isMinimized || c.window.isFullScreen
         }.map(\.id)
     }
 
@@ -582,8 +592,9 @@ final class ScrollStrip {
         guard !gone.isEmpty else { return }
         Debug.log("strip: dropping \(gone) (closed or minimized)")
         // A minimized window gets its own frame back now, so it unminimizes where it was.
+        // Not a full-screen one: resizing it could knock it out of full screen.
         for id in gone {
-            if let w = originalWindows[id], let f = originals[id], AXWindow.serverFrame(of: id) != nil { w.setFrame(f) }
+            if let w = originalWindows[id], let f = originals[id], AXWindow.serverFrame(of: id) != nil, !w.isFullScreen { w.setFrame(f) }
         }
         // Remember each one's left neighbour: un-minimized, it goes back there.
         for id in gone {
