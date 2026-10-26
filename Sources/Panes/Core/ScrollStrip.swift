@@ -120,7 +120,6 @@ final class ScrollStrip {
         for c in columns { watch(c) }
         installMonitors()
         refreshSnapshots()
-        backdrop = DesktopBackdrop.image(for: s)
         let p = ScrollPad(screen: s)
         p.layout = { [weak self] in self?.padModel() ?? ([], 0, 1) }
         p.onDrag = { [weak self] dx in self?.padDragged(dx) }
@@ -148,7 +147,6 @@ final class ScrollStrip {
         pad?.orderOut(nil); pad = nil
         missionControlKey = nil
         snapshots = [:]
-        backdrop = nil
         closePeek()
         overview?.close(); overview = nil
         // Everything that was ever in the strip goes back, not only what's still listed.
@@ -261,8 +259,6 @@ final class ScrollStrip {
 
     private var proxy: StripProxy?
     private var snapshots: [CGWindowID: CGImage] = [:]
-    /// The desktop picture, taken when the strip starts: the backdrop for pictures.
-    private var backdrop: CGImage?
     private var wheelTarget: CGFloat?
     private var wheelIdle: DispatchWorkItem?
     private var pad: ScrollPad?
@@ -395,10 +391,32 @@ final class ScrollStrip {
         guard proxy == nil else { return }
         Debug.log("strip: begin motion permission=\(WindowCapture.hasPermission) snapshots=\(snapshots.count)/\(columns.count)")
         guard WindowCapture.hasPermission, columns.allSatisfy({ snapshots[$0.id] != nil }) else { return }
-        let p = StripProxy(area: area, screen: screen, images: snapshots, backdrop: backdrop)
+        let p = StripProxy(area: area, images: snapshots)
         p.layout(trueFrames())
         p.show()
         proxy = p
+        // Once the pictures are up, the real windows step out from under them.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self, weak p] in
+            guard let self, let p, self.proxy === p else { return }
+            self.stowWindows()
+        }
+    }
+
+    /// While pictures stand in for the strip, the real windows wait just past the
+    /// screen edge, so the live desktop (a moving wallpaper, widgets) shows between
+    /// the pictures. 1pt stays on screen so macOS doesn't hand them to another
+    /// display; they go out on the side that has no display next to it.
+    private func stowWindows() {
+        guard let screen else { return }
+        let frame = screen.axFrame
+        let neighbourRight = NSScreen.screens.contains { s in
+            let f = s.axFrame
+            return s != screen && f.minX >= frame.maxX - 1 && f.minY < frame.maxY && f.maxY > frame.minY
+        }
+        for c in columns {
+            let slot = slot(x: 0, column: c)
+            c.window.setPosition(CGPoint(x: neighbourRight ? frame.minX - slot.width + 1 : frame.maxX - 1, y: slot.minY))
+        }
     }
 
     private func render() {
@@ -683,8 +701,7 @@ final class ScrollStrip {
         for id in mostlyVisibleColumns() { if let img = WindowCapture.snapshot(id) { snapshots[id] = img } }
         let images = snapshots
         Debug.log("strip: overview with pictures for \(columns.filter { images[$0.id] != nil }.count)/\(columns.count); missing \(columns.filter { images[$0.id] == nil }.map { $0.window.bundleID ?? "?" })")
-        if backdrop == nil, let screen { backdrop = DesktopBackdrop.image(for: screen) }
-        let o = StripOverview(area: area, screen: screen, backdrop: backdrop, images: images,
+        let o = StripOverview(area: area, images: images,
                               now: trueFrames(), overview: overviewFrames())
         o.onPick = { [weak self, weak o] id in
             guard let self, let o else { return }
@@ -700,9 +717,16 @@ final class ScrollStrip {
                 }
             }
         }
-        o.onDismiss = { [weak self] in self?.overview = nil }
+        o.onDismiss = { [weak self] in
+            self?.applyFrames()
+            self?.overview = nil
+        }
         overview = o
         o.present()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self, weak o] in
+            guard let self, let o, self.overview === o else { return }
+            self.stowWindows()
+        }
     }
 
     /// Offset that brings a column fully into view with the least movement.
@@ -730,17 +754,15 @@ final class ScrollStrip {
     }
 }
 
-/// The zoomed-out strip, GTA-map style: the desktop picture dims behind, and every
-/// tile starts exactly where its window is, then shrinks out to the overview; picking
-/// one zooms back in onto that column. Animations are explicit (from → to) so they
-/// play even on the panel's very first frame.
+/// The zoomed-out strip, GTA-map style, over the live desktop: every tile starts
+/// exactly where its window is, then shrinks out to the overview; picking one zooms
+/// back in onto that column. Animations are explicit (from → to) so they play even
+/// on the panel's very first frame.
 final class StripOverview: NSObject {
     var onPick: (CGWindowID) -> Void = { _ in }
     var onDismiss: () -> Void = {}
     private let panel: NSPanel
     private let root = CALayer()
-    private let backdropLayer = CALayer()
-    private let dim = CALayer()
     private var tiles: [CGWindowID: CALayer] = [:]
     private let area: CGRect
     private let now: [(CGWindowID, CGRect)]
@@ -752,7 +774,7 @@ final class StripOverview: NSObject {
         return d > 0 ? d : 0.65
     }
 
-    init(area: CGRect, screen: NSScreen?, backdrop: CGImage?, images: [CGWindowID: CGImage],
+    init(area: CGRect, images: [CGWindowID: CGImage],
          now: [(CGWindowID, CGRect)], overview: [(CGWindowID, CGRect)]) {
         self.area = area
         self.now = now
@@ -760,8 +782,8 @@ final class StripOverview: NSObject {
         panel = NSPanel(contentRect: Geometry.cocoaRect(fromAX: area), styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
         super.init()
-        panel.isOpaque = true
-        panel.backgroundColor = .black
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.level = .floating
         panel.animationBehavior = .none
@@ -771,16 +793,9 @@ final class StripOverview: NSObject {
         // AppKit takes the tree over and drops our animations.
         view.layer = root
         view.wantsLayer = true
-        root.backgroundColor = NSColor.black.cgColor
-        // The desktop, and a dimmer over it that deepens as the view pulls back.
-        backdropLayer.contents = backdrop
-        backdropLayer.contentsGravity = .resizeAspectFill
-        backdropLayer.frame = screen.map { StripProxy.local($0.axFrame, in: area) } ?? root.bounds
-        root.addSublayer(backdropLayer)
-        dim.frame = CGRect(origin: .zero, size: area.size)
-        dim.backgroundColor = NSColor.black.cgColor
-        dim.opacity = 0
-        root.addSublayer(dim)
+        // The real desktop shows through; a trace of colour keeps clicks on the
+        // empty space from falling through to it.
+        root.backgroundColor = NSColor.black.withAlphaComponent(0.01).cgColor
         for (id, f) in now {
             let l = CALayer()
             l.contents = images[id]
@@ -801,14 +816,14 @@ final class StripOverview: NSObject {
 
     func present() {
         panel.orderFrontRegardless()
-        animate(to: target, dim: 0, backdropScale: 1) {}
+        animate(to: target) {}
         keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] e in
             if e.keyCode == 53 { self?.dismiss() }        // Esc
         }
     }
 
-    /// Glide every tile (and the backdrop's pull-back) to a state, explicitly.
-    private func animate(to frames: [(CGWindowID, CGRect)], dim toDim: Float, backdropScale: CGFloat, done: @escaping () -> Void) {
+    /// Glide every tile to a state, explicitly.
+    private func animate(to frames: [(CGWindowID, CGRect)], done: @escaping () -> Void = {}) {
         busy = true
         // A gentle start, then a long glide in: the pull-back reads as a camera move.
         let timing = CAMediaTimingFunction(controlPoints: 0.45, 0, 0.15, 1)
@@ -834,13 +849,6 @@ final class StripOverview: NSObject {
             animate(l, "position", from: NSValue(point: CGPoint(x: start.midX, y: start.midY)), to: NSValue(point: CGPoint(x: end.midX, y: end.midY)))
             animate(l, "bounds.size", from: NSValue(size: start.size), to: NSValue(size: end.size))
         }
-        let fromDim = dim.presentation()?.opacity ?? dim.opacity
-        dim.opacity = toDim
-        animate(dim, "opacity", from: fromDim, to: toDim)
-        let fromT = backdropLayer.presentation()?.transform ?? backdropLayer.transform
-        let toT = CATransform3DMakeScale(backdropScale, backdropScale, 1)
-        backdropLayer.transform = toT
-        animate(backdropLayer, "transform", from: NSValue(caTransform3D: fromT), to: NSValue(caTransform3D: toT))
         CATransaction.commit()
     }
 
@@ -857,15 +865,16 @@ final class StripOverview: NSObject {
     func zoomIn(to frames: [(CGWindowID, CGRect)], done: @escaping () -> Void) {
         if let m = keyMonitor { NSEvent.removeMonitor(m) }
         keyMonitor = nil
-        animate(to: frames, dim: 0, backdropScale: 1, done: done)
+        animate(to: frames, done: done)
     }
 
     /// Esc or a click on empty space: zoom back to how things were.
     func dismiss() {
         guard !busy else { return }
+        // The windows go back first, then the tiles over them lift off.
         zoomIn(to: now) { [weak self] in
-            self?.close()
             self?.onDismiss()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { self?.close() }
         }
     }
 
@@ -931,21 +940,20 @@ final class PeekCard {
     }
 }
 
-/// Pictures of every column sliding over the screen while the strip moves, on top
-/// of the desktop picture (so around short windows it looks like the desktop, and the
-/// real windows' stale positions don't show through).
+/// Pictures of every column sliding over the live desktop while the strip moves
+/// (the real windows step aside meanwhile, see ScrollStrip.stowWindows).
 final class StripProxy {
     private let panel: NSPanel
     private let root = CALayer()
     private var layers: [CGWindowID: CALayer] = [:]
     private let area: CGRect
 
-    init(area: CGRect, screen: NSScreen?, images: [CGWindowID: CGImage], backdrop: CGImage?) {
+    init(area: CGRect, images: [CGWindowID: CGImage]) {
         self.area = area
         panel = NSPanel(contentRect: Geometry.cocoaRect(fromAX: area), styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
-        panel.isOpaque = true
-        panel.backgroundColor = .windowBackgroundColor
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.level = .floating
         panel.ignoresMouseEvents = true
@@ -955,14 +963,6 @@ final class StripProxy {
         let v = NSView(frame: CGRect(origin: .zero, size: area.size))
         v.layer = root
         v.wantsLayer = true
-        root.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        if let backdrop, let screen {
-            let bg = CALayer()
-            bg.contents = backdrop
-            bg.contentsGravity = .resizeAspectFill
-            bg.frame = Self.local(screen.axFrame, in: area)
-            root.addSublayer(bg)
-        }
         for (id, img) in images {
             let l = CALayer()
             l.contents = img
