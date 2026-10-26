@@ -36,7 +36,6 @@ struct SettingsData: Codable {
 
     // Titlebar gestures
     var trackpadGesturesEnabled = true
-    var scrollWheelGesturesEnabled = true
     var flingEnabled = true
 
     // Carry to every Space
@@ -77,7 +76,7 @@ struct SettingsData: Codable {
         d(.moveModifier, &moveModifier); d(.resizeModifier, &resizeModifier); d(.raiseOnHoverMove, &raiseOnHoverMove)
         d(.layouts, &layouts); d(.skipMinimizedOnRestore, &skipMinimizedOnRestore)
         d(.excludedBundleIDs, &excludedBundleIDs); d(.showMenuBarIcon, &showMenuBarIcon)
-        d(.trackpadGesturesEnabled, &trackpadGesturesEnabled); d(.scrollWheelGesturesEnabled, &scrollWheelGesturesEnabled)
+        d(.trackpadGesturesEnabled, &trackpadGesturesEnabled)
         d(.flingEnabled, &flingEnabled); d(.carryEnabled, &carryEnabled)
         d(.slideOverEnabled, &slideOverEnabled); d(.slideOverDwell, &slideOverDwell)
         d(.splitDividersEnabled, &splitDividersEnabled); d(.scrollStripEnabled, &scrollStripEnabled)

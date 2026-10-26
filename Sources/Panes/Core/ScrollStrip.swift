@@ -530,16 +530,26 @@ final class ScrollStrip {
 
     /// Closed or minimized windows give up their place.
     /// Columns whose window left: closed, minimized, or put away — many apps only
-    /// order a window out when it's closed, with no destroyed notice. When none of
-    /// them is on screen, it's a switch to another Space, not windows leaving.
+    /// order a window out when it's closed, with no destroyed notice. Off screen alone
+    /// isn't enough: App Exposé and Mission Control take other apps' windows off screen
+    /// too, and when none of the strip is on screen it's another Space. So a window
+    /// that's off screen leaves only if it's destroyed, minimized, or gone from its
+    /// app's window list (where an ordered-out window no longer appears). Window-server
+    /// lookups first: the apps are only asked about windows already off screen.
     private func goneColumns() -> [CGWindowID] {
         let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
         let onScreen = Set(list.compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
-        let off = columns.filter { !onScreen.contains($0.id) }.map(\.id)
-        let away = off.count == columns.count ? [] : off
-        // Only window-server lookups here (it runs twice a second): a minimized window
-        // is off screen too, and a destroyed one has no frame left.
-        return columns.filter { away.contains($0.id) || AXWindow.serverFrame(of: $0.id) == nil }.map(\.id)
+        let off = columns.filter { !onScreen.contains($0.id) }
+        guard !off.isEmpty, off.count < columns.count else { return [] }
+        var listed: [pid_t: Set<CGWindowID>?] = [:]
+        return off.filter { c in
+            if AXWindow.serverFrame(of: c.id) == nil { return true }
+            let pid = c.window.pid
+            if listed[pid] == nil { listed[pid] = AXWindow.windowIDs(of: pid) }
+            // No answer from the app: keep the window rather than guess.
+            guard let ids = listed[pid] ?? nil else { return false }
+            return !ids.contains(c.id) || c.window.isMinimized
+        }.map(\.id)
     }
 
     private func dropGoneColumns() {

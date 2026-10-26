@@ -23,7 +23,6 @@ struct FeaturesTab: View {
     private var gestureSection: some View {
         Section {
             Toggle("触控板：两指滑动、张开、捏合", isOn: $settings.data.trackpadGesturesEnabled)
-            Toggle("鼠标滚轮：在标题栏上滚 3 格算一次滑动", isOn: $settings.data.scrollWheelGesturesEnabled)
             Toggle("甩动：拖着标题栏快速甩出去再松手", isOn: $settings.data.flingEnabled)
         } header: {
             Text("标题栏手势")

@@ -82,6 +82,13 @@ struct AXWindow: Hashable {
         return arr.map(AXWindow.init)
     }
 
+    /// The app's windows by window number; nil when the app doesn't answer.
+    static func windowIDs(of pid: pid_t) -> Set<CGWindowID>? {
+        let appEl = AXUIElementCreateApplication(pid)
+        guard let arr: [AXUIElement] = appEl.attr(kAXWindowsAttribute) else { return nil }
+        return Set(arr.compactMap { AXWindow($0).cgWindowID })
+    }
+
     // MARK: Attributes
 
     var position: CGPoint? {

@@ -1,5 +1,6 @@
-// Title-bar gestures: two-finger swipes, mouse-wheel notches and pinches over a
-// window's title bar arrange that window; nothing happens until you let go.
+// Title-bar gestures: two-finger swipes and pinches over a window's title bar
+// arrange that window; nothing happens until you let go. (The mouse wheel over a
+// title bar only scrolls the scroll strip.)
 // Approach adapted from WindowShade (MIT, https://github.com/surfine/WindowShade):
 //   docs/gestures.md "怎么判定" — direction after 10pt, switching needs 1.25×, armed at
 //     56pt, release projects the last 50ms of velocity (× 0.099s), a quick flick of 18pt+
@@ -11,8 +12,6 @@
 //   "和 App 自己的手势共存" — scrollable content keeps the whole gesture; tabs, address
 //     bars and the like keep horizontal swipes, and a gesture that starts sideways there
 //     is left to the app entirely;
-//   docs/input-devices.md / prototype/App/ScrollTap.swift — a wheel notch burst counts
-//     as one swipe (three notches here).
 
 import AppKit
 
@@ -51,12 +50,6 @@ final class TitlebarGestures {
     /// A gesture whose start didn't qualify: ignore the rest of it.
     private var ignoringGesture = false
 
-    private struct Wheel { var window: AXWindow?; var frame: CGRect; var bar: CGFloat; var anchor: CGPoint
-        var dir: Dir; var count: Int; var last: Date; var owned: Bool }
-    private var wheel: Wheel?
-    /// An unfinished wheel burst (fewer than three notches) times out quietly.
-    private var wheelTimeout: DispatchWorkItem?
-
     private struct Pinch { var window: AXWindow; var anchor: CGPoint; var total: CGFloat = 0 }
     private var pinch: Pinch?
     private var ignoringPinch = false
@@ -67,7 +60,8 @@ final class TitlebarGestures {
 
     /// Installs exactly the listeners the switches ask for; removes the rest.
     func applySettings() {
-        let wantScroll = settings.trackpadGesturesEnabled || settings.scrollWheelGesturesEnabled
+        // The scroll strip listens here too: the wheel over a column's title bar scrolls it.
+        let wantScroll = settings.trackpadGesturesEnabled || settings.scrollStripEnabled
         if wantScroll, scrollMonitor == nil {
             scrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] e in self?.scroll(e) }
         } else if !wantScroll, let m = scrollMonitor {
@@ -90,10 +84,7 @@ final class TitlebarGestures {
     private func scroll(_ e: NSEvent) {
         if ScrollStrip.shared.isActive, routeToStrip(e) { return }
         guard e.momentumPhase.isEmpty else { return }
-        if e.phase.isEmpty {
-            if settings.scrollWheelGesturesEnabled, !e.hasPreciseScrollingDeltas { wheelNotch(e) }
-            return
-        }
+        if e.phase.isEmpty { return }
         guard settings.trackpadGesturesEnabled else { return }
         if e.phase.contains(.began) {
             begin()
@@ -300,66 +291,6 @@ final class TitlebarGestures {
     private func cancelTrack() {
         track = nil
         GestureHUD.shared.cancel()
-    }
-
-    // MARK: Mouse wheel
-
-    /// Three notches in one direction over a title bar make one swipe.
-    private func wheelNotch(_ e: NSEvent) {
-        let dx = e.scrollingDeltaX, dy = e.scrollingDeltaY
-        guard abs(dx) >= 0.1 || abs(dy) >= 0.1 else { return }
-        let dir: Dir = abs(dx) > abs(dy) ? (dx > 0 ? .right : .left) : (dy > 0 ? .down : .up)
-        // Line-based wheel events: one line per notch, more when the wheel spins fast.
-        let notches = max(1, Int(max(abs(dx), abs(dy)).rounded()))
-        let now = Date()
-        if var w = wheel, now.timeIntervalSince(w.last) < 0.6, w.dir == dir {
-            w.last = now
-            guard let win = w.window, !(dir.horizontal && w.owned) else { wheel = w; return }
-            w.count += notches
-            wheel = w
-            wheelProgress(w, win)
-        } else {
-            // A new burst: check the title bar once.
-            let p = Geometry.mouseAX
-            var w = Wheel(window: nil, frame: .zero, bar: 0, anchor: p, dir: dir, count: notches, last: now, owned: false)
-            if Titlebar.mayBeTitlebar(p), let hit = Titlebar.hit(at: p, allowControls: true),
-               !Settings.shared.isExcluded(hit.window.bundleID) {
-                w.window = hit.window; w.frame = hit.frame; w.bar = hit.barHeight
-                w.owned = hit.chain.contains { Titlebar.usesHorizontalSwipes($0.role, subrole: $0.subrole) }
-            }
-            wheel = w
-            Debug.log("wheel: burst \(dir) on \(w.window?.bundleID ?? "no title bar")")
-            if let win = w.window, !(dir.horizontal && w.owned) { wheelProgress(w, win) }
-        }
-    }
-
-    private func wheelProgress(_ w: Wheel, _ win: AXWindow) {
-        wheelTimeout?.cancel()
-        let timeout = DispatchWorkItem { [weak self] in
-            self?.wheel = nil
-            GestureHUD.shared.cancel()
-        }
-        wheelTimeout = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: timeout)
-        let p: Placement?
-        let symbol: String
-        switch w.dir {
-        case .up: p = upPlacement(win); symbol = "arrow.uturn.backward"
-        case .down: p = downPlacement(win); symbol = "rectangle.inset.filled"
-        case .left, .right:
-            let side: Side = w.dir == .left ? .left : .right
-            p = WindowManager.shared.ladder(win, side: side)
-            symbol = side == .left ? "rectangle.lefthalf.inset.filled" : "rectangle.righthalf.inset.filled"
-        }
-        guard let p else { return }
-        GestureHUD.shared.update(title: p.title, symbol: symbol, progress: CGFloat(min(w.count, 3)) / 3, reversed: w.dir == .left,
-                                 anchor: CGPoint(x: w.anchor.x, y: w.frame.minY + w.bar))
-        if w.count >= 3 {
-            wheelTimeout?.cancel()
-            WindowManager.shared.execute(p, on: win, animated: false)
-            GestureHUD.shared.finish()
-            wheel?.count = 0      // keep scrolling the same way to climb the ladder
-        }
     }
 
     // MARK: Pinch
