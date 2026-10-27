@@ -42,12 +42,42 @@ final class ScrollStrip {
     private var lastFocusedColumn: CGWindowID?
     /// Closing a window often only orders it out, with no notice: look twice a second.
     private var goneCheck: Timer?
+    private var padFollow: Timer?
     private var activationObserver: Any?
     private var launchObserver: Any?
     private var dockClickMonitor: Any?
     private var peek: PeekCard?
     private var peekWork: DispatchWorkItem?
-    private var overview: StripOverview?
+    private var overview: StripOverview? { didSet { overviewUp.value = overview != nil } }
+    /// Whether the overview is up, readable from the ⌃↑ tap's thread.
+    private let overviewUp = LockedFlag()
+    /// The Space (and display) the strip lives on.
+    private var homeSpace: Int?
+    private var homeDisplay: String?
+    private var spaceObserver: Any?
+
+    /// The strip's own Space is showing (Mission Control can claim it is: don't let
+    /// that alone change the strip).
+    private var onHomeSpace: Bool { homeSpace == nil || Spaces.current(on: homeDisplay) == homeSpace }
+
+    /// Left the strip's Space mid-overview or mid-slide: nothing may stay stepped
+    /// aside or half-done there. Close the overview / finish the slide now.
+    private func spaceChanged() {
+        guard isActive, !onHomeSpace else { return }
+        if let o = overview {
+            Debug.log("strip: left the strip's Space with the overview open: closing it")
+            overview = nil
+            o.close()
+            placeWindows()
+        }
+        if proxy != nil || animation?.isValid == true {
+            animation?.invalidate()
+            wheelIdle?.cancel()
+            wheelTarget = nil
+            offset = clamp(offset)
+            endMotion()
+        }
+    }
     /// ⌃↑ opens the strip overview instead of Mission Control, only while a strip is on.
     private var missionControlKey: KeyIntercept?
 
@@ -148,13 +178,18 @@ final class ScrollStrip {
         p.update(offset: offset)
         p.orderFrontRegardless()
         // Only on the strip's own Space: on another desktop or a full-screen app ⌃↑
-        // stays Mission Control. Asked at the press, by Space ID — Mission Control
-        // being open doesn't change it, so ⌃↑ still closes Mission Control there.
-        let display = Spaces.displayID(of: s), home = Spaces.current(on: display)
+        // stays Mission Control. Asked at the press, by Space ID. An open overview is
+        // always closed by ⌃↑, wherever you are.
+        homeDisplay = Spaces.displayID(of: s)
+        homeSpace = Spaces.current(on: homeDisplay)
+        let display = homeDisplay, home = homeSpace, overviewUp = overviewUp
         missionControlKey = KeyIntercept(keyCode: 126, flags: .maskControl,
-                                         when: { home == nil || Spaces.current(on: display) == home }) { [weak self] in
+                                         when: { overviewUp.value || home == nil || Spaces.current(on: display) == home }) { [weak self] in
             self?.toggleOverview()
         }
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.spaceChanged() }
         HotKeyManager.shared.reload()
         Debug.log("strip: \(columns.count) columns, total \(Int(totalWidth))pt")
         GestureHUD.shared.flash("卷轴：\(columns.count) 列", symbol: "rectangle.split.3x1", anchor: CGPoint(x: area.midX, y: area.minY + 40))
@@ -168,6 +203,8 @@ final class ScrollStrip {
         proxy?.close(); proxy = nil
         pad?.orderOut(nil); pad = nil
         missionControlKey = nil
+        if let o = spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
+        spaceObserver = nil
         snapshots = [:]
         closePeek()
         overview?.close(); overview = nil
@@ -726,6 +763,9 @@ final class ScrollStrip {
     }
 
     private func dropGoneColumns() {
+        // Only on the strip's own Space: elsewhere (another desktop, a full-screen app,
+        // Mission Control) the strip's windows are out of sight, not gone.
+        guard onHomeSpace else { return }
         let gone = goneColumns()
         guard !gone.isEmpty else { return }
         Debug.log("strip: dropping \(gone) (closed or minimized)")
@@ -756,7 +796,7 @@ final class ScrollStrip {
     }
 
     private func adoptNewWindows() {
-        guard isActive, let screen else { return }
+        guard isActive, let screen, onHomeSpace else { return }
         dropGoneColumns()
         let known = Set(columns.map(\.id))
         let fresh = Self.windows(on: screen).filter { !known.contains($0.0) }
@@ -831,6 +871,11 @@ final class ScrollStrip {
             guard let self, self.proxy == nil, self.overview == nil, self.moving == nil else { return }
             self.dropGoneColumns()
         }
+        // The Dock changes width as apps come and go: the pad keeps to the room left of it.
+        padFollow = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            guard let self, let s = self.screen else { return }
+            self.pad?.follow(s)
+        }
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular
             && app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             watchApp(app.processIdentifier)
@@ -841,6 +886,8 @@ final class ScrollStrip {
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   app.activationPolicy == .regular else { return }
             self?.watchApp(app.processIdentifier)
+            // Its Dock icon slides in: follow once the Dock has settled.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { if let s = self?.screen { self?.pad?.follow(s) } }
         }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
@@ -874,6 +921,8 @@ final class ScrollStrip {
     private func removeMonitors() {
         goneCheck?.invalidate()
         goneCheck = nil
+        padFollow?.invalidate()
+        padFollow = nil
         edgeSensors.forEach { $0.orderOut(nil) }
         edgeSensors = []
         if let o = activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
@@ -1012,7 +1061,7 @@ final class ScrollStrip {
     /// bar): the screen zooms out from where things are now; pick a window and it
     /// zooms back in onto that window's column.
     func showOverview() {
-        guard isActive, overview == nil else { return }
+        guard isActive, overview == nil, onHomeSpace else { return }
         let asked = Date()
         animation?.invalidate()
         proxy?.close(); proxy = nil
@@ -1383,6 +1432,16 @@ final class StripProxy {
     deinit { panel.orderOut(nil) }
 }
 
+/// A Bool shared with another thread (the ⌃↑ tap).
+final class LockedFlag {
+    private var v = false
+    private let lock = NSLock()
+    var value: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return v }
+        set { lock.lock(); v = newValue; lock.unlock() }
+    }
+}
+
 /// An invisible strip over one screen edge's sliver (see ScrollStrip.updateEdgeSensors):
 /// the pointer arriving or leaving, and clicks, without a system-wide mouse monitor.
 final class EdgeSensor: NSPanel {
@@ -1453,9 +1512,10 @@ final class ScrollPad: NSPanel {
         let band = vf.minY - f.minY                              // Cocoa: a bottom Dock sits under the visible frame
         let width: CGFloat = 260
         guard band >= 30 else { return CGRect(x: vf.minX + 8, y: vf.minY + 8, width: width, height: 52) }
+        // All the room up to the Dock (it follows the Dock as apps come and go).
         let room = (dockIconsFrame().map { $0.minX } ?? f.midX) - f.minX - 16
         if room >= 140 {
-            return CGRect(x: f.minX + 8, y: f.minY + 4, width: min(width, room), height: band - 8)
+            return CGRect(x: f.minX + 8, y: f.minY + 4, width: min(480, room), height: band - 8)
         }
         return CGRect(x: vf.minX + 8, y: vf.minY + 8, width: width, height: 52)
     }
@@ -1468,6 +1528,17 @@ final class ScrollPad: NSPanel {
         let kids: [AXUIElement] = app.attr(kAXChildrenAttribute) ?? []
         guard let list = kids.first(where: { $0.role == "AXList" }), let r = list.frame else { return nil }
         return Geometry.cocoaRect(fromAX: r)
+    }
+
+    /// The Dock grew or shrank: take the room that's there now.
+    func follow(_ screen: NSScreen) {
+        let f = Self.placement(on: screen)
+        guard abs(f.minX - frame.minX) > 1 || abs(f.width - frame.width) > 1 || abs(f.minY - frame.minY) > 1 || abs(f.height - frame.height) > 1 else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.2
+            animator().setFrame(f, display: true)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [weak self] in self?.update(offset: 0) }
     }
 
     func update(offset: CGFloat) {
