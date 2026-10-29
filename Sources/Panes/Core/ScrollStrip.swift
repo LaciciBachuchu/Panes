@@ -218,6 +218,7 @@ final class ScrollStrip {
         slideEnds = nil
         focusOnRest = false
         proxy?.close(); proxy = nil
+        fading?.close(); fading = nil
         pad?.orderOut(nil); pad = nil
         missionControlKey = nil
         if let o = spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
@@ -383,6 +384,8 @@ final class ScrollStrip {
     // Recording it falls back to moving the real windows directly.
 
     private var proxy: StripProxy?
+    /// The last cover, fading off the real windows after a stop.
+    private var fading: StripProxy?
     private var snapshots: [CGWindowID: CGImage] = [:]
     private var wheelTarget: CGFloat?
     private var wheelIdle: DispatchWorkItem?
@@ -396,7 +399,8 @@ final class ScrollStrip {
         wheelTarget = nil
         closePeek()
         focusOnRest = true
-        // Catching up after the cover went up: keep heading for where the fingers are.
+        // Following the fingers (or catching up to them): keep heading for where they
+        // are; anything else under way stops where it shows.
         if catchUpEnds.map({ $0 > Date() }) != true { stopSlide() }
         // Past the ends it moves at a third of the speed (rubber band).
         let next = offset - dx
@@ -626,6 +630,8 @@ final class ScrollStrip {
     /// How long a motion may wait for fresh pictures of the windows on screen before
     /// going ahead with the ones in hand.
     private static let freshWait: TimeInterval = 0.15
+    /// How far the pictures trail the fingers, smoothing out uneven events.
+    private static let followLag: TimeInterval = 0.04
 
     /// Motion starts: cover the strip with its picture, if every column has one.
     /// `fresh`: first retake the windows on screen (their contents may have changed
@@ -680,6 +686,8 @@ final class ScrollStrip {
     }
 
     private func raiseCover(_ layout: [(CGWindowID, CGRect)]) {
+        fading?.close()
+        fading = nil
         let p = StripProxy(area: area, images: snapshots)
         p.layout(layout)
         p.show()
@@ -790,22 +798,31 @@ final class ScrollStrip {
     private func placeWindows(resizing: Set<CGWindowID> = [], done: @escaping () -> Void = {}) {
         var sizes: [CGWindowID: CGSize] = [:]
         for i in columns.indices where resizing.contains(columns[i].id) { sizes[columns[i].id] = frame(of: i, at: offset).size }
-        move(columns.indices.map { (columns[$0].window, frame(of: $0, at: offset).origin) }, sizes: sizes) { [weak self] in
+        // The ones you'll see first; `done` doesn't wait for the parked ones at the edges.
+        let parked = Set(columns.indices.filter { isParked($0, at: offset) })
+        let shown = columns.indices.filter { !parked.contains($0) }
+        move(shown.map { (columns[$0].window, frame(of: $0, at: offset).origin) }, sizes: sizes) { [weak self] in
             self?.updateEdgeSensors()
             done()
+        }
+        if !parked.isEmpty {
+            move(parked.map { (columns[$0].window, frame(of: $0, at: offset).origin) }, sizes: sizes) { [weak self] in
+                self?.updateEdgeSensors()
+            }
         }
     }
 
     /// Show the strip at `offset` now (fingers, pad drags; and the real windows' own
     /// frame-by-frame steps when there are no pictures).
     private func render() {
-        if let proxy {
-            // Still catching up to the fingers: keep gliding, toward where they are now.
-            if let end = catchUpEnds, end.timeIntervalSinceNow > 0.01 {
-                return slide(to: offset, duration: end.timeIntervalSinceNow, curve: .out)
-            }
-            pad?.update(offset: offset)
-            proxy.layout(trueFrames())
+        if proxy != nil {
+            // Each movement is a glide of a few frames toward where the fingers are now
+            // (or what's left of catching up): when events come in unevenly, as they do
+            // under load, the pictures still move continuously.
+            let left = catchUpEnds?.timeIntervalSinceNow ?? 0
+            let d = max(left, Self.followLag)
+            catchUpEnds = Date() + d
+            slide(to: offset, duration: d, curve: left > Self.followLag ? .out : .chase)
         } else {
             pad?.update(offset: offset)
             // Waiting for fresh pictures: the windows stay where they are until the cover is up.
@@ -827,13 +844,24 @@ final class ScrollStrip {
         let p = proxy
         proxy = nil
         let began = Date()
-        let focus = focusOnRest
+        // Focus first: the window's switch to its active look happens while the
+        // pictures still cover it, not as a second change after they've gone.
+        if focusOnRest { focusFrontColumn() }
         focusOnRest = false
         placeWindows(resizing: resizing) { [weak self] in
             Debug.log("strip: windows back in \(Int(Date().timeIntervalSince(began) * 1000))ms")
-            // One frame for the window server to show them, then the pictures go.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { p?.close() }
-            if focus { self?.focusFrontColumn() }
+            // Two frames for the window server to show them, then the pictures fade off
+            // them — unless the strip is already moving again.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0 / 60) {
+                guard let p else { return }
+                guard let self, self.proxy == nil, self.overview == nil else { return p.close() }
+                self.fading?.close()
+                self.fading = p
+                p.fadeOut(duration: 0.14)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                    if self?.fading === p { self?.fading = nil }
+                }
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 guard let self, self.isActive, self.proxy == nil, self.overview == nil else { return }
                 self.fitColumnsToWindows()
@@ -847,7 +875,15 @@ final class ScrollStrip {
     private func refreshSnapshots(visibleOnly: Bool = false, done: (([CGWindowID: CGImage]) -> Void)? = nil) {
         guard isActive, WindowCapture.hasPermission else { return }
         let ids = visibleOnly ? trueFrames().filter { $0.1.intersects(area) }.map(\.0) : columns.map(\.id)
-        WindowCapture.capture(ids) { [weak self] shots in
+        // Wholly on screen: the quick way, sparing the machine ScreenCaptureKit's work.
+        let whole = Set(trueFrames().filter { area.insetBy(dx: -1, dy: -1).contains($0.1) && ids.contains($0.0) }.map(\.0))
+        if visibleOnly, !whole.isEmpty {
+            WindowCapture.captureOnScreen(Array(whole)) { [weak self] shots in
+                guard let self, self.isActive else { return }
+                self.snapshots.merge(shots) { $1 }
+            }
+        }
+        WindowCapture.capture(visibleOnly ? ids.filter { !whole.contains($0) } : ids) { [weak self] shots in
             guard let self, self.isActive else { return }
             self.snapshots.merge(shots) { $1 }
             done?(shots)
@@ -1314,6 +1350,7 @@ final class ScrollStrip {
         cancelCover()
         focusOnRest = false
         proxy?.close(); proxy = nil
+        fading?.close(); fading = nil
         closePeek()
         dropGoneColumns()
         guard isActive else { return }
@@ -1634,7 +1671,12 @@ final class StripProxy {
     private let panel: NSPanel
     private let root = CALayer()
     private var layers: [CGWindowID: CALayer] = [:]
+    /// A soft shadow under each picture, like the real window's, so nothing pops in
+    /// when the real windows take over. Its own layer (the picture is clipped to its
+    /// rounded corners, which would clip a shadow too), drawn from a path: cheap.
+    private var shadows: [CGWindowID: CALayer] = [:]
     private let area: CGRect
+    private static let corner: CGFloat = 16
 
     init(area: CGRect, images: [CGWindowID: CGImage]) {
         self.area = area
@@ -1651,11 +1693,22 @@ final class StripProxy {
         let v = NSView(frame: CGRect(origin: .zero, size: area.size))
         v.layer = root
         v.wantsLayer = true
+        // All shadows under all pictures: a neighbour's shadow never lies across a picture.
+        for id in images.keys {
+            let sh = CALayer()
+            sh.shadowColor = NSColor.black.cgColor
+            sh.shadowOpacity = 0.28
+            sh.shadowRadius = 14
+            sh.shadowOffset = CGSize(width: 0, height: -8)
+            root.addSublayer(sh)
+            shadows[id] = sh
+        }
         for (id, img) in images {
             let l = CALayer()
             l.contents = img
             l.contentsGravity = .resize
-            l.cornerRadius = 10
+            l.cornerRadius = Self.corner
+            l.cornerCurve = .continuous
             l.masksToBounds = true
             root.addSublayer(l)
             layers[id] = l
@@ -1669,13 +1722,22 @@ final class StripProxy {
         CGRect(x: ax.minX - area.minX, y: area.maxY - ax.maxY, width: ax.width, height: ax.height)
     }
 
+    private static func shadowPath(_ size: CGSize) -> CGPath {
+        CGPath(roundedRect: CGRect(origin: .zero, size: size), cornerWidth: corner, cornerHeight: corner, transform: nil)
+    }
+
     func layout(_ frames: [(CGWindowID, CGRect)]) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         for (id, f) in frames {
-            guard let l = layers[id] else { continue }
-            l.removeAllAnimations()
-            l.frame = Self.local(f, in: area)
+            let r = Self.local(f, in: area)
+            for l in [layers[id], shadows[id]].compactMap({ $0 }) {
+                l.removeAllAnimations()
+                l.frame = r
+            }
+            if let sh = shadows[id], sh.shadowPath == nil || sh.shadowPath?.boundingBox.size != r.size {
+                sh.shadowPath = Self.shadowPath(r.size)
+            }
         }
         CATransaction.commit()
     }
@@ -1687,29 +1749,48 @@ final class StripProxy {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         CATransaction.setCompletionBlock(done)
+        func animate(_ l: CALayer, _ key: String, from: Any, to: Any) {
+            let a = CABasicAnimation(keyPath: key)
+            a.fromValue = from
+            a.toValue = to
+            a.duration = duration
+            a.timingFunction = timing
+            l.add(a, forKey: key)
+        }
         for (id, f) in frames {
-            guard let l = layers[id] else { continue }
-            let now = l.presentation() ?? l
-            let from = (now.position, now.bounds)
-            l.removeAllAnimations()
-            l.frame = Self.local(f, in: area)
-            if from.0 != l.position {
-                let a = CABasicAnimation(keyPath: "position")
-                a.fromValue = NSValue(point: from.0)
-                a.toValue = NSValue(point: l.position)
-                a.duration = duration
-                a.timingFunction = timing
-                l.add(a, forKey: "position")
-            }
-            if from.1.size != l.bounds.size {
-                let a = CABasicAnimation(keyPath: "bounds")
-                a.fromValue = NSValue(rect: from.1)
-                a.toValue = NSValue(rect: l.bounds)
-                a.duration = duration
-                a.timingFunction = timing
-                l.add(a, forKey: "bounds")
+            let r = Self.local(f, in: area)
+            for l in [layers[id], shadows[id]].compactMap({ $0 }) {
+                let now = l.presentation() ?? l
+                let from = (now.position, now.bounds)
+                l.removeAllAnimations()
+                l.frame = r
+                if from.0 != l.position { animate(l, "position", from: NSValue(point: from.0), to: NSValue(point: l.position)) }
+                if from.1.size != l.bounds.size {
+                    animate(l, "bounds", from: NSValue(rect: from.1), to: NSValue(rect: l.bounds))
+                    if l === shadows[id] {
+                        let path = Self.shadowPath(r.size)
+                        animate(l, "shadowPath", from: Self.shadowPath(from.1.size), to: path)
+                        l.shadowPath = path
+                    }
+                }
             }
         }
+        CATransaction.commit()
+    }
+
+    /// The real windows are in place under the pictures: let them show through
+    /// over a moment, so whatever differs (focus styling, a window that redrew)
+    /// blends instead of popping. The window server runs the fade.
+    func fadeOut(duration: CFTimeInterval) {
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [self] in panel.orderOut(nil) }
+        let a = CABasicAnimation(keyPath: "opacity")
+        a.fromValue = 1
+        a.toValue = 0
+        a.duration = duration
+        a.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        root.opacity = 0
+        root.add(a, forKey: "fade")
         CATransaction.commit()
     }
 
@@ -1793,7 +1874,8 @@ final class ScrollPad: NSPanel {
         super.init(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = true
+        // The glass draws its own edge, like the Dock's.
+        hasShadow = false
         level = NSWindow.Level(NSWindow.Level.dock.rawValue + 1)
         collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle, .stationary]
         hidesOnDeactivate = false
@@ -1805,17 +1887,23 @@ final class ScrollPad: NSPanel {
         contentView = view
     }
 
-    /// Bottom left, as tall as the Dock, in the free space left of the Dock's icons;
-    /// when there's no room there, just above the Dock. Never on top of the Dock.
+    /// Bottom left, in the free space left of the Dock's icons, the Dock's twin: the
+    /// same height, the same distance off the bottom (and as far from the left edge),
+    /// 8pt short of it. When there's no room there, just above the Dock. Never on
+    /// top of the Dock.
     static func placement(on screen: NSScreen) -> CGRect {
         let f = screen.frame, vf = screen.visibleFrame
         let band = vf.minY - f.minY                              // Cocoa: a bottom Dock sits under the visible frame
         let width: CGFloat = 260
         guard band >= 30 else { return CGRect(x: vf.minX + 8, y: vf.minY + 8, width: width, height: 52) }
         // All the room up to the Dock (it follows the Dock as apps come and go).
-        let room = (dockIconsFrame().map { $0.minX } ?? f.midX) - f.minX - 16
-        if room >= 140 {
-            return CGRect(x: f.minX + 8, y: f.minY + 4, width: min(480, room), height: band - 8)
+        if let dock = dockIconsFrame(), dock.minY >= f.minY, dock.minY < vf.minY {
+            let margin = dock.minY - f.minY
+            let room = dock.minX - f.minX - margin - 8
+            if room >= 140 { return CGRect(x: f.minX + margin, y: dock.minY, width: min(480, room), height: dock.height) }
+        } else {
+            let room = f.midX - f.minX - 16
+            if room >= 140 { return CGRect(x: f.minX + 8, y: f.minY + 4, width: min(480, room), height: band - 8) }
         }
         return CGRect(x: vf.minX + 8, y: vf.minY + 8, width: width, height: 52)
     }
@@ -1856,26 +1944,50 @@ private final class PadView: NSView {
     var onDoubleClick: () -> Void = {}
     private var last: (x: CGFloat, t: TimeInterval)?
     private var velocity: CGFloat = 0
-    private let glass = NSVisualEffectView()
+    private let glass: NSView
     let map = MapView()
 
-    var mapRect: CGRect { bounds.insetBy(dx: 12, dy: 10) }
+    var mapRect: CGRect { map.mapRect }
+
+    /// The Dock's corners at the Dock's height (about a quarter of it).
+    static func corner(for height: CGFloat) -> CGFloat { (height * 0.245).rounded() }
 
     override init(frame: NSRect) {
+        if #available(macOS 26, *) {
+            // Liquid Glass, as the Dock is made of.
+            let g = NSGlassEffectView()
+            g.style = .regular
+            g.cornerRadius = Self.corner(for: frame.height)
+            map.frame = CGRect(origin: .zero, size: frame.size)
+            map.autoresizingMask = [.width, .height]
+            g.contentView = map
+            glass = g
+        } else {
+            let v = NSVisualEffectView()
+            v.material = .hudWindow
+            v.blendingMode = .behindWindow
+            v.state = .active
+            v.wantsLayer = true
+            v.layer?.cornerRadius = Self.corner(for: frame.height)
+            glass = v
+        }
         super.init(frame: frame)
-        glass.material = .hudWindow
-        glass.blendingMode = .behindWindow
-        glass.state = .active
-        glass.wantsLayer = true
-        glass.layer?.cornerRadius = 12
         glass.autoresizingMask = [.width, .height]
         glass.frame = bounds
         addSubview(glass)
-        // Drawn above the glass (a parent's own drawing would sit underneath it).
-        map.frame = bounds
-        map.autoresizingMask = [.width, .height]
-        addSubview(map)
+        if map.superview == nil {
+            // Drawn above the glass (a parent's own drawing would sit underneath it).
+            map.frame = bounds
+            map.autoresizingMask = [.width, .height]
+            addSubview(map)
+        }
         toolTip = "拖动或在上面滚动滚轮来滚动卷轴"
+    }
+
+    override func layout() {
+        super.layout()
+        let r = Self.corner(for: bounds.height)
+        if #available(macOS 26, *), let g = glass as? NSGlassEffectView { g.cornerRadius = r } else { glass.layer?.cornerRadius = r }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -1928,15 +2040,22 @@ private final class MapView: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        viewportLayer.cornerRadius = 5
+        viewportLayer.cornerRadius = 8
+        viewportLayer.cornerCurve = .continuous
         viewportLayer.borderWidth = 1.5
         layer?.addSublayer(viewportLayer)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Inside the pad's rounded corners, with even room all round.
+    var mapRect: CGRect {
+        let inset = max(10, PadView.corner(for: bounds.height) * 0.6)
+        return bounds.insetBy(dx: inset, dy: inset)
+    }
+
     private func viewportRect(_ v: (CGFloat, CGFloat)) -> CGRect {
-        let map = bounds.insetBy(dx: 12, dy: 10)
+        let map = mapRect
         return CGRect(x: map.minX + map.width * v.0, y: map.minY - 3, width: map.width * v.1, height: map.height + 6)
     }
 
@@ -1971,13 +2090,13 @@ private final class MapView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let map = bounds.insetBy(dx: 12, dy: 10)
+        let map = mapRect
         var x = map.minX
         for (i, c) in columns.enumerated() {
             let w = map.width * c
             let r = CGRect(x: x + 1, y: map.minY, width: max(1, w - 2), height: map.height)
-            NSColor.white.withAlphaComponent(i % 2 == 0 ? 0.30 : 0.20).setFill()
-            NSBezierPath(roundedRect: r, xRadius: 3, yRadius: 3).fill()
+            NSColor.white.withAlphaComponent(i % 2 == 0 ? 0.38 : 0.26).setFill()
+            NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
             x += w
         }
         // The accent can change while the strip is on.
