@@ -139,6 +139,8 @@ final class SplitDividers {
         }
         var result: [Seam] = []
         for screen in NSScreen.screens {
+            // A scroll strip's columns sit side by side but aren't a split: no bars there.
+            if screen == ScrollStrip.shared.activeScreen { continue }
             let vf = screen.axVisibleFrame
             var kept: [(CGWindowID, CGRect)] = []
             var covered: CGFloat = 0

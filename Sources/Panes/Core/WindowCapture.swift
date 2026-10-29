@@ -45,6 +45,24 @@ enum WindowCapture {
         }
     }
 
+    /// Pictures of windows that are wholly on screen, straight from the window server
+    /// (a few tens of ms where ScreenCaptureKit can take hundreds under load), all at
+    /// once on background threads; `done` gets them on the main thread.
+    static func captureOnScreen(_ ids: [CGWindowID], done: @escaping ([CGWindowID: CGImage]) -> Void) {
+        guard hasPermission, !ids.isEmpty else { return done([:]) }
+        DispatchQueue.global(qos: .userInteractive).async {
+            var out = [CGImage?](repeating: nil, count: ids.count)
+            let lock = NSLock()
+            DispatchQueue.concurrentPerform(iterations: ids.count) { i in
+                let img = snapshot(ids[i])
+                lock.lock(); out[i] = img; lock.unlock()
+            }
+            var result: [CGWindowID: CGImage] = [:]
+            for (id, img) in zip(ids, out) { if let img { result[id] = img } }
+            DispatchQueue.main.async { done(result) }
+        }
+    }
+
     /// One still picture of a window, nil without permission.
     static func snapshot(_ id: CGWindowID) -> CGImage? {
         guard hasPermission else { return nil }

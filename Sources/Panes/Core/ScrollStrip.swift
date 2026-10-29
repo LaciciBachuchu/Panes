@@ -40,6 +40,12 @@ final class ScrollStrip {
     private var returnAfter: [CGWindowID: CGWindowID] = [:]
     /// The strip column you were last in (new windows open next to it).
     private var lastFocusedColumn: CGWindowID?
+    /// You scrolled: once the strip stops, the column in front takes focus.
+    private var focusOnRest = false
+    /// The column the strip just focused itself (switching to it mustn't slide it).
+    private var autoFocused: (id: CGWindowID, at: Date)?
+    /// Keeps macOS from napping or coalescing Panes' timers while a strip is on.
+    private var activity: NSObjectProtocol?
     /// Closing a window often only orders it out, with no notice: look twice a second.
     private var goneCheck: Timer?
     private var padFollow: Timer?
@@ -70,8 +76,9 @@ final class ScrollStrip {
             o.close()
             placeWindows()
         }
-        if proxy != nil || animation?.isValid == true {
+        if proxy != nil || coverPending != nil || animation?.isValid == true {
             animation?.invalidate()
+            stopSlide()
             wheelIdle?.cancel()
             wheelTarget = nil
             offset = clamp(offset)
@@ -82,6 +89,8 @@ final class ScrollStrip {
     private var missionControlKey: KeyIntercept?
 
     var isActive: Bool { !columns.isEmpty }
+    /// The screen the strip is on, while it's on.
+    var activeScreen: NSScreen? { isActive ? screen : nil }
     private var gap: CGFloat { CGFloat(Settings.shared.data.gap) }
 
     func contains(_ w: AXWindow) -> Bool {
@@ -191,6 +200,10 @@ final class ScrollStrip {
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.spaceChanged() }
         HotKeyManager.shared.reload()
+        // The strip's screen has no split dividers: its columns aren't a split.
+        SplitDividers.shared.soon()
+        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical],
+                                                         reason: "Scroll strip follows input")
         Debug.log("strip: \(columns.count) columns, total \(Int(totalWidth))pt")
         GestureHUD.shared.flash("卷轴：\(columns.count) 列", symbol: "rectangle.split.3x1", anchor: CGPoint(x: area.midX, y: area.minY + 40))
     }
@@ -200,6 +213,10 @@ final class ScrollStrip {
         animation?.invalidate()
         wheelIdle?.cancel()
         wheelTarget = nil
+        cancelCover()
+        slideCount += 1
+        slideEnds = nil
+        focusOnRest = false
         proxy?.close(); proxy = nil
         pad?.orderOut(nil); pad = nil
         missionControlKey = nil
@@ -225,6 +242,9 @@ final class ScrollStrip {
         resizeWork?.cancel()
         iconCache = [:]
         removeMonitors()
+        if let a = activity { ProcessInfo.processInfo.endActivity(a) }
+        activity = nil
+        SplitDividers.shared.soon()
         ParkedJournal.clear("strip")
         HotKeyManager.shared.reload()
     }
@@ -321,7 +341,7 @@ final class ScrollStrip {
         let w = DispatchWorkItem { [weak self] in
             guard let self, self.isActive else { return }
             // Still dragging, or the strip is moving: look again shortly.
-            if NSEvent.pressedMouseButtons & 1 != 0 || self.proxy != nil || self.overview != nil || self.moving != nil {
+            if NSEvent.pressedMouseButtons & 1 != 0 || self.proxy != nil || self.coverPending != nil || self.overview != nil || self.moving != nil {
                 self.windowResized()
                 return
             }
@@ -375,11 +395,22 @@ final class ScrollStrip {
         animation?.invalidate()
         wheelTarget = nil
         closePeek()
-        beginMotion()
+        focusOnRest = true
+        // Catching up after the cover went up: keep heading for where the fingers are.
+        if catchUpEnds.map({ $0 > Date() }) != true { stopSlide() }
         // Past the ends it moves at a third of the speed (rubber band).
         let next = offset - dx
         offset = (next < 0 || next > maxOffset) ? offset - dx / 3 : next
+        beginMotion(ready: { [weak self] in self?.catchUp() })
         render()
+    }
+
+    /// The cover went up where the windows were; the fingers have moved on since the
+    /// pictures were asked for. Glide there quickly instead of jumping.
+    private func catchUp() {
+        let d = 0.12
+        catchUpEnds = Date() + d
+        slide(to: offset, duration: d, curve: .out)
     }
 
     /// Fingers lifted with a velocity (pt/s, content direction): coast, then stop on a column edge.
@@ -394,10 +425,17 @@ final class ScrollStrip {
     func wheel(by delta: CGFloat) {
         guard overview == nil else { return }
         closePeek()
-        beginMotion()
+        focusOnRest = true
+        if wheelTarget == nil { stopSlide() }
         let base = wheelTarget ?? offset
         wheelTarget = min(max(base + delta, -60), maxOffset + 60)
-        if animation == nil || !(animation?.isValid ?? false) {
+        switch beginMotion(ready: { [weak self] in self?.chaseWheel() }) {
+        case .ready: chaseWheel()
+        case .pending: pad?.update(offset: wheelTarget ?? offset)
+        case .none: break
+        }
+        if proxy == nil, coverPending == nil, animation == nil || !(animation?.isValid ?? false) {
+            // No pictures: the real windows follow, frame by frame.
             animation = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] t in
                 guard let self, let target = self.wheelTarget else { t.invalidate(); return }
                 self.offset += (target - self.offset) * 0.22
@@ -415,8 +453,16 @@ final class ScrollStrip {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: w)
     }
 
+    /// Each notch moves the target; the pictures chase it in a short glide that the
+    /// window server runs, so it stays smooth however busy Panes is.
+    private func chaseWheel() {
+        guard proxy != nil, let t = wheelTarget else { return }
+        slide(to: t, duration: 0.22, curve: .chase)
+    }
+
     /// One column left or right.
     func step(_ direction: Int) {
+        focusOnRest = true
         let candidates = snapCandidates()
         let next = direction > 0 ? candidates.first { $0 > offset + 1 } : candidates.last { $0 < offset - 1 }
         animate(to: next ?? offset)
@@ -457,7 +503,7 @@ final class ScrollStrip {
         snapCandidates().min { abs($0 - projected) < abs($1 - projected) } ?? clamp(projected)
     }
 
-    func scroll(toColumnOf id: CGWindowID, curve: @escaping (Double) -> CGFloat = ScrollStrip.ease) {
+    func scroll(toColumnOf id: CGWindowID, curve: Curve = .out) {
         guard let i = columns.firstIndex(where: { $0.id == id }) else { return }
         // Bring it fully on screen with the least movement.
         let s = start(of: i), w = columns[i].width
@@ -466,19 +512,32 @@ final class ScrollStrip {
         animate(to: clamp(target), curve: curve)
     }
 
-    /// Ease the offset to a target (~0.3s) at 120 fps, then settle the real windows.
-    private func animate(to target: CGFloat, curve: @escaping (Double) -> CGFloat = ScrollStrip.ease) {
+    /// Ease the offset to a target, then settle the real windows. With pictures up
+    /// the glide runs in the window server (smooth under load); without, the real
+    /// windows step there at 120 fps.
+    private func animate(to target: CGFloat, curve: Curve = .out, caller: String = #function) {
         guard overview == nil else { return }
+        Debug.log("strip: glide to \(Int(target)) from \(Int(offset)) (\(caller))")
         animation?.invalidate()
         wheelIdle?.cancel()
         wheelTarget = nil
-        let from = offset, began = Date(), duration = Self.slideDuration
-        guard abs(target - from) > 0.5 else { offset = clamp(target); endMotion(); return }
-        beginMotion()
+        stopSlide()
+        let duration = Self.slideDuration
+        guard abs(target - offset) > 0.5 else { offset = clamp(target); endMotion(); return }
+        let glide = { [weak self] in
+            guard let self else { return }
+            self.slide(to: target, duration: duration, curve: curve) { [weak self] in self?.endMotion() }
+        }
+        switch beginMotion(ready: glide) {
+        case .ready: return glide()
+        case .pending: pad?.update(offset: target); return
+        case .none: break
+        }
+        let from = offset, began = Date()
         animation = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] t in
             guard let self else { t.invalidate(); return }
             let k = min(1, Date().timeIntervalSince(began) / duration)
-            let e = curve(k)
+            let e = curve.f(k)
             self.offset = from + (target - from) * e
             self.render()
             if k >= 1 {
@@ -505,6 +564,19 @@ final class ScrollStrip {
         k >= 1 ? 1 : CGFloat((1 - Foundation.pow(2.0, -10 * k)) / (1 - Foundation.pow(2.0, -10.0)))
     }
 
+    /// An easing, both as a function (for the real windows stepping frame by frame)
+    /// and as the window server's curve (for the pictures).
+    struct Curve {
+        let f: (Double) -> CGFloat
+        let timing: CAMediaTimingFunction
+        /// Fast off the mark, long soft landing.
+        static let out = Curve(f: ScrollStrip.ease, timing: CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1))
+        /// Gentle start, quick middle, gentle landing.
+        static let inOut = Curve(f: ScrollStrip.easeInOut, timing: CAMediaTimingFunction(controlPoints: 0.65, 0, 0.35, 1))
+        /// Chasing a wheel's target: most of the way at once, like following it frame by frame.
+        static let chase = Curve(f: ScrollStrip.ease, timing: CAMediaTimingFunction(controlPoints: 0.12, 0.78, 0.3, 1))
+    }
+
     /// Columns changed — a window joined or left. Everything slides from where it was
     /// to the new layout (a joining window from where it opened), then the real
     /// windows settle there; a joining window takes its column size while out of sight.
@@ -513,32 +585,22 @@ final class ScrollStrip {
         animation?.invalidate()
         wheelIdle?.cancel()
         wheelTarget = nil
+        focusOnRest = false
+        stopSlide()
+        cancelCover()
         proxy?.close(); proxy = nil
         offset = clamp(target)
-        let end = Dictionary(uniqueKeysWithValues: trueFrames())
-        let start = columns.map { ($0.id, old[$0.id] ?? end[$0.id]!) }
-        guard WindowCapture.hasPermission, columns.allSatisfy({ snapshots[$0.id] != nil }) else {
+        let end = trueFrames()
+        let endByID = Dictionary(uniqueKeysWithValues: end)
+        let start = columns.map { ($0.id, old[$0.id] ?? endByID[$0.id]!) }
+        // The pictures in hand: a window that just closed shouldn't wait for new ones.
+        guard beginMotion(at: start, fresh: false) == .ready else {
             // No pictures to slide: put the windows there directly.
             applyFrames()
             fitColumnsToWindows()
             return
         }
-        beginMotion(at: start)
-        let began = Date(), duration = Self.slideDuration
-        animation = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] t in
-            guard let self, let proxy = self.proxy else { t.invalidate(); return }
-            let k = min(1, Date().timeIntervalSince(began) / duration)
-            let e = Self.ease(k)
-            proxy.layout(start.map { id, a in
-                let b = end[id] ?? a
-                return (id, CGRect(x: a.minX + (b.minX - a.minX) * e, y: a.minY + (b.minY - a.minY) * e,
-                                   width: a.width + (b.width - a.width) * e, height: a.height + (b.height - a.height) * e))
-            })
-            if k >= 1 {
-                t.invalidate()
-                self.endMotion(resizing: resizing)
-            }
-        }
+        slide(end, duration: Self.slideDuration, curve: .out, offset: offset) { [weak self] in self?.endMotion(resizing: resizing) }
     }
 
     /// Where each column truly is at the current offset (not parked), for the picture.
@@ -547,14 +609,79 @@ final class ScrollStrip {
         return columns.indices.map { i in (columns[i].id, slot(x: area.minX + start(of: i) - o, column: columns[i])) }
     }
 
+    // MARK: The cover (pictures standing in while the strip moves)
+
+    private enum Cover { case ready, pending, none }
+
+    /// Pictures being retaken for a motion that's starting (its number), and what to
+    /// do once the cover is up.
+    private var coverPending: Int?
+    private var coverReady: (() -> Void)?
+    private var coverCount = 0
+    /// The glide under way in the window server (its number, when it lands).
+    private var slideCount = 0
+    private var slideEnds: Date?
+    private var catchUpEnds: Date?
+
+    /// How long a motion may wait for fresh pictures of the windows on screen before
+    /// going ahead with the ones in hand.
+    private static let freshWait: TimeInterval = 0.15
+
     /// Motion starts: cover the strip with its picture, if every column has one.
-    private func beginMotion(at start: [(CGWindowID, CGRect)]? = nil) {
-        pad?.update(offset: offset)
-        guard proxy == nil else { return }
-        Debug.log("strip: begin motion permission=\(WindowCapture.hasPermission) snapshots=\(snapshots.count)/\(columns.count)")
-        guard WindowCapture.hasPermission, columns.allSatisfy({ snapshots[$0.id] != nil }) else { return }
+    /// `fresh`: first retake the windows on screen (their contents may have changed
+    /// since the last stop); the real windows stay put meanwhile and `ready` runs
+    /// once the cover is up. Returns whether the cover is up now, coming, or not
+    /// possible (no pictures: the real windows move themselves).
+    @discardableResult
+    private func beginMotion(at start: [(CGWindowID, CGRect)]? = nil, fresh: Bool = true, ready: (() -> Void)? = nil) -> Cover {
+        if proxy != nil { return .ready }
+        if coverPending != nil { coverReady = ready; return .pending }
+        guard WindowCapture.hasPermission, columns.allSatisfy({ snapshots[$0.id] != nil }) else {
+            Debug.log("strip: begin motion without pictures (permission=\(WindowCapture.hasPermission) snapshots=\(snapshots.count)/\(columns.count))")
+            return .none
+        }
+        let layout = start ?? trueFrames()
+        guard fresh else { raiseCover(layout); return .ready }
+        coverCount += 1
+        let n = coverCount, asked = Date()
+        coverPending = n
+        coverReady = ready
+        let go: (Bool) -> Void = { [weak self] fresh in
+            guard let self, self.coverPending == n else { return }
+            self.coverPending = nil
+            Debug.log("strip: cover up after \(Int(Date().timeIntervalSince(asked) * 1000))ms, \(fresh ? "fresh" : "pictures in hand")")
+            self.raiseCover(layout)
+            let r = self.coverReady
+            self.coverReady = nil
+            r?()
+        }
+        // Windows wholly on screen are quick to picture where they are; one cut by the
+        // screen edge only comes whole through ScreenCaptureKit, which is slow: its
+        // picture swaps in whenever it arrives.
+        let shown = layout.filter { $0.1.intersects(area) }
+        let whole = shown.filter { area.insetBy(dx: -1, dy: -1).contains($0.1) }.map(\.0)
+        let cut = shown.map(\.0).filter { !whole.contains($0) }
+        WindowCapture.captureOnScreen(whole) { [weak self] shots in
+            self?.snapshots.merge(shots) { $1 }
+            go(true)
+        }
+        WindowCapture.capture(cut) { [weak self] shots in
+            guard let self, self.isActive else { return }
+            self.snapshots.merge(shots) { $1 }
+            self.proxy?.update(images: shots)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.freshWait) { go(false) }
+        return .pending
+    }
+
+    private func cancelCover() {
+        coverPending = nil
+        coverReady = nil
+    }
+
+    private func raiseCover(_ layout: [(CGWindowID, CGRect)]) {
         let p = StripProxy(area: area, images: snapshots)
-        p.layout(start ?? trueFrames())
+        p.layout(layout)
         p.show()
         proxy = p
         // Once the pictures are on screen (one frame), the real windows step out from under them.
@@ -563,6 +690,42 @@ final class ScrollStrip {
             guard let self, let p, self.proxy === p else { return }
             self.stowWindows(done: {})
         }
+    }
+
+    /// The pictures glide to the strip at `target`, run by the window server.
+    private func slide(to target: CGFloat, duration: TimeInterval, curve: Curve, then done: (() -> Void)? = nil) {
+        offset = target
+        slide(trueFrames(), duration: duration, curve: curve, offset: target, then: done)
+    }
+
+    private func slide(_ frames: [(CGWindowID, CGRect)], duration: TimeInterval, curve: Curve, offset target: CGFloat,
+                       then done: (() -> Void)? = nil) {
+        guard let proxy else { return }
+        slideCount += 1
+        let n = slideCount
+        slideEnds = Date() + duration
+        proxy.slide(frames, duration: duration, timing: curve.timing) { [weak self] in
+            guard let self, self.slideCount == n else { return }
+            self.slideEnds = nil
+            done?()
+        }
+        pad?.update(offset: target, duration: duration, timing: curve.timing)
+    }
+
+    /// Where the strip shows right now: mid-glide the pictures are on their way to `offset`.
+    private func shownOffset() -> CGFloat {
+        guard let proxy, slideEnds.map({ $0 > Date() }) == true, let first = columns.first,
+              let x = proxy.shownMinX(of: first.id) else { return offset }
+        return offset - (x - trueFrames()[0].1.minX)
+    }
+
+    /// Stop a glide where it is now (something else takes over from there).
+    private func stopSlide() {
+        catchUpEnds = nil
+        guard slideEnds != nil else { return }
+        offset = shownOffset()
+        slideEnds = nil
+        slideCount += 1
     }
 
     /// Window moves under way right now (stowing or placing), each on its own thread.
@@ -633,9 +796,21 @@ final class ScrollStrip {
         }
     }
 
+    /// Show the strip at `offset` now (fingers, pad drags; and the real windows' own
+    /// frame-by-frame steps when there are no pictures).
     private func render() {
-        pad?.update(offset: offset)
-        if let proxy { proxy.layout(trueFrames()) } else { applyPositions() }
+        if let proxy {
+            // Still catching up to the fingers: keep gliding, toward where they are now.
+            if let end = catchUpEnds, end.timeIntervalSinceNow > 0.01 {
+                return slide(to: offset, duration: end.timeIntervalSinceNow, curve: .out)
+            }
+            pad?.update(offset: offset)
+            proxy.layout(trueFrames())
+        } else {
+            pad?.update(offset: offset)
+            // Waiting for fresh pictures: the windows stay where they are until the cover is up.
+            if coverPending == nil { applyPositions() }
+        }
     }
 
     /// Motion ended: the real windows go back all at once, and the pictures lift off
@@ -644,14 +819,21 @@ final class ScrollStrip {
     private func endMotion(resizing: Set<CGWindowID> = []) {
         // Under the overview the windows stay aside; it puts them back when it closes.
         guard overview == nil else { return }
+        cancelCover()
+        slideEnds = nil
+        catchUpEnds = nil
+        slideCount += 1
         pad?.update(offset: offset)
         let p = proxy
         proxy = nil
         let began = Date()
+        let focus = focusOnRest
+        focusOnRest = false
         placeWindows(resizing: resizing) { [weak self] in
             Debug.log("strip: windows back in \(Int(Date().timeIntervalSince(began) * 1000))ms")
             // One frame for the window server to show them, then the pictures go.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { p?.close() }
+            if focus { self?.focusFrontColumn() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 guard let self, self.isActive, self.proxy == nil, self.overview == nil else { return }
                 self.fitColumnsToWindows()
@@ -727,14 +909,38 @@ final class ScrollStrip {
         case kAXFocusedWindowChangedNotification:
             // Another window of the same app (⌘`, a click): bring it into view; also a
             // window only ordered out on close lets focus go, so look for leavers.
+            checkGoneSoon()
             guard proxy == nil, overview == nil, moving == nil else { return }
-            dropGoneColumns()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.revealFocused() }
         default:
             // Destroyed, minimized, or focus moved on (a window that was only ordered
-            // out on close lets focus go). Mid-move the slow look catches it later.
-            guard proxy == nil, overview == nil, moving == nil else { return }
-            dropGoneColumns()
+            // out on close lets focus go).
+            checkGoneSoon()
+        }
+    }
+
+    /// A window may just have left. The notice often comes while it's still fading
+    /// out on screen, or while the strip is busy: look now and a few more times over
+    /// the next half second, so the neighbours close the gap as soon as it's gone.
+    private func checkGoneSoon() {
+        // The app in front is asked for its window list off the main thread: it may
+        // be slow to answer while it closes the window.
+        if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier, columns.contains(where: { $0.window.pid == pid }) {
+            DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+                let ids = AXWindow.windowIDs(of: pid)
+                DispatchQueue.main.async {
+                    // Mid-glide too: the others close the gap from where they show.
+                    guard let self, self.isActive, self.coverPending == nil, self.overview == nil else { return }
+                    self.dropGoneColumns(known: (pid, ids))
+                }
+            }
+        }
+        for d in [0.0, 0.1, 0.25, 0.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + d) { [weak self] in
+                guard let self, self.isActive else { return }
+                guard self.coverPending == nil, self.overview == nil else { return }
+                self.dropGoneColumns()
+            }
         }
     }
 
@@ -745,13 +951,23 @@ final class ScrollStrip {
     /// that's off screen leaves only if it's destroyed, minimized, or gone from its
     /// app's window list (where an ordered-out window no longer appears). Window-server
     /// lookups first: the apps are only asked about windows already off screen.
-    private func goneColumns() -> [CGWindowID] {
+    /// `known`: the window list of an app that just said its focus moved — a window
+    /// it closed leaves that list at once, while the window itself takes a while to
+    /// fade off screen.
+    private func goneColumns(known: (pid: pid_t, ids: Set<CGWindowID>?)? = nil) -> [CGWindowID] {
         let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
         let onScreen = Set(list.compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
-        let off = columns.filter { !onScreen.contains($0.id) }
-        guard !off.isEmpty, off.count < columns.count else { return [] }
         var listed: [pid_t: Set<CGWindowID>?] = [:]
-        return off.filter { c in
+        var closing: [CGWindowID] = []
+        if let (pid, ids) = known {
+            listed[pid] = ids
+            if let ids {
+                closing = columns.filter { $0.window.pid == pid && onScreen.contains($0.id) && !ids.contains($0.id) }.map(\.id)
+            }
+        }
+        let off = columns.filter { !onScreen.contains($0.id) }
+        guard !off.isEmpty || !closing.isEmpty, off.count < columns.count else { return [] }
+        return closing + off.filter { c in
             if AXWindow.serverFrame(of: c.id) == nil { return true }
             let pid = c.window.pid
             if listed[pid] == nil { listed[pid] = AXWindow.windowIDs(of: pid) }
@@ -762,11 +978,11 @@ final class ScrollStrip {
         }.map(\.id)
     }
 
-    private func dropGoneColumns() {
+    private func dropGoneColumns(known: (pid: pid_t, ids: Set<CGWindowID>?)? = nil) {
         // Only on the strip's own Space: elsewhere (another desktop, a full-screen app,
         // Mission Control) the strip's windows are out of sight, not gone.
         guard onHomeSpace else { return }
-        let gone = goneColumns()
+        let gone = goneColumns(known: known)
         guard !gone.isEmpty else { return }
         Debug.log("strip: dropping \(gone) (closed or minimized)")
         // A minimized window gets its own frame back now, so it unminimizes where it was.
@@ -779,7 +995,7 @@ final class ScrollStrip {
             guard let i = columns.firstIndex(where: { $0.id == id }) else { continue }
             returnAfter[id] = columns[..<i].last { !gone.contains($0.id) }?.id ?? 0
         }
-        let before = Dictionary(uniqueKeysWithValues: trueFrames())
+        let before = Dictionary(uniqueKeysWithValues: trueFrames(at: shownOffset()))
         columns.removeAll { gone.contains($0.id) }
         if columns.isEmpty { exit(); return }
         // The others slide together over the gap, each keeping its width.
@@ -844,7 +1060,7 @@ final class ScrollStrip {
         // Mid-move the real windows are stepped aside and the pictures are what's
         // under the pointer: test against where the pictures are.
         if proxy != nil || moving != nil {
-            return trueFrames().contains { _, f in f.contains(p) && p.y - f.minY <= Titlebar.webTitlebarBand }
+            return trueFrames(at: shownOffset()).contains { _, f in f.contains(p) && p.y - f.minY <= Titlebar.webTitlebarBand }
         }
         guard area.contains(p) || p.y >= area.minY - 2,
               let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
@@ -867,7 +1083,7 @@ final class ScrollStrip {
         // keeping its own width. Not mid-move: the windows are stepped aside then.
         // Mostly the windows' own notices (destroyed, minimized, focus moving on) say
         // when one may have left; this slow look catches anything they miss.
-        goneCheck = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        goneCheck = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self, self.proxy == nil, self.overview == nil, self.moving == nil else { return }
             self.dropGoneColumns()
         }
@@ -900,6 +1116,8 @@ final class ScrollStrip {
         // The Dock's frame is asked of the Dock at most every few seconds, not on every click.
         var dockFrame: (CGRect?, Date) = (nil, .distantPast)
         dockClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in
+            // A click may have been on a close button (some apps only order the window out).
+            self?.checkGoneSoon()
             if Date().timeIntervalSince(dockFrame.1) > 5 { dockFrame = (ScrollPad.dockIconsFrame(), Date()) }
             guard let dock = dockFrame.0, dock.contains(NSEvent.mouseLocation) else { return }
             // The app handles the click (reopen, un-minimize) before its window is raised.
@@ -913,9 +1131,35 @@ final class ScrollStrip {
         guard proxy == nil, overview == nil, moving == nil,
               let id = AXWindow.focused()?.cgWindowID, columns.contains(where: { $0.id == id }) else { return }
         lastFocusedColumn = id
+        if let a = autoFocused, a.id == id, Date().timeIntervalSince(a.at) < 1.5 { return }
         guard abs(visibleOffset(for: id) - offset) > 1 else { return }
         Debug.log("strip: revealing column \(id)")
-        scroll(toColumnOf: id, curve: Self.easeInOut)
+        scroll(toColumnOf: id, curve: .inOut)
+    }
+
+    /// After you scroll, the column now in front takes focus — unless the one you
+    /// were in is still (nearly) all in view. In front: the most of it on screen,
+    /// the one nearer the middle when that's a tie.
+    private func focusFrontColumn() {
+        guard isActive, proxy == nil, overview == nil, onHomeSpace else { return }
+        func onScreen(_ f: CGRect) -> CGFloat { max(0, min(f.maxX, area.maxX) - max(f.minX, area.minX)) }
+        let frames = trueFrames()
+        let shown = Dictionary(uniqueKeysWithValues: frames.map { ($0.0, onScreen($0.1) / max(1, $0.1.width)) })
+        guard let front = frames.max(by: { a, b in
+            let sa = onScreen(a.1), sb = onScreen(b.1)
+            if abs(sa - sb) > 4 { return sa < sb }
+            return abs(a.1.midX - area.midX) > abs(b.1.midX - area.midX)
+        }), onScreen(front.1) > 0, let w = columns.first(where: { $0.id == front.0 })?.window else { return }
+        // Asking an app is slow under load: off the main thread.
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            if let id = AXWindow.focused()?.cgWindowID, id == front.0 || (shown[id] ?? 0) >= 0.9 { return }
+            DispatchQueue.main.async {
+                self?.autoFocused = (front.0, Date())
+                self?.lastFocusedColumn = front.0
+            }
+            Debug.log("strip: focusing column \(front.0) after the scroll")
+            w.raise()
+        }
     }
 
     private func removeMonitors() {
@@ -1064,6 +1308,11 @@ final class ScrollStrip {
         guard isActive, overview == nil, onHomeSpace else { return }
         let asked = Date()
         animation?.invalidate()
+        wheelIdle?.cancel()
+        wheelTarget = nil
+        stopSlide()
+        cancelCover()
+        focusOnRest = false
         proxy?.close(); proxy = nil
         closePeek()
         dropGoneColumns()
@@ -1423,8 +1672,59 @@ final class StripProxy {
     func layout(_ frames: [(CGWindowID, CGRect)]) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        for (id, f) in frames { layers[id]?.frame = Self.local(f, in: area) }
+        for (id, f) in frames {
+            guard let l = layers[id] else { continue }
+            l.removeAllAnimations()
+            l.frame = Self.local(f, in: area)
+        }
         CATransaction.commit()
+    }
+
+    /// Every picture glides from where it shows now to `frames`. The window server
+    /// runs it, so it stays smooth whatever Panes or the apps are busy with. `done`
+    /// runs when it lands (also when it's cut short by the next layout or glide).
+    func slide(_ frames: [(CGWindowID, CGRect)], duration: CFTimeInterval, timing: CAMediaTimingFunction, done: @escaping () -> Void) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        CATransaction.setCompletionBlock(done)
+        for (id, f) in frames {
+            guard let l = layers[id] else { continue }
+            let now = l.presentation() ?? l
+            let from = (now.position, now.bounds)
+            l.removeAllAnimations()
+            l.frame = Self.local(f, in: area)
+            if from.0 != l.position {
+                let a = CABasicAnimation(keyPath: "position")
+                a.fromValue = NSValue(point: from.0)
+                a.toValue = NSValue(point: l.position)
+                a.duration = duration
+                a.timingFunction = timing
+                l.add(a, forKey: "position")
+            }
+            if from.1.size != l.bounds.size {
+                let a = CABasicAnimation(keyPath: "bounds")
+                a.fromValue = NSValue(rect: from.1)
+                a.toValue = NSValue(rect: l.bounds)
+                a.duration = duration
+                a.timingFunction = timing
+                l.add(a, forKey: "bounds")
+            }
+        }
+        CATransaction.commit()
+    }
+
+    /// Fresher pictures arrived mid-motion.
+    func update(images: [CGWindowID: CGImage]) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (id, img) in images { layers[id]?.contents = img }
+        CATransaction.commit()
+    }
+
+    /// Where a picture's left edge shows right now (AX x), mid-glide too.
+    func shownMinX(of id: CGWindowID) -> CGFloat? {
+        guard let l = layers[id] else { return nil }
+        return (l.presentation() ?? l).frame.minX + area.minX
     }
 
     func show() { panel.orderFrontRegardless() }
@@ -1485,7 +1785,7 @@ final class ScrollPad: NSPanel {
     var onRelease: (CGFloat) -> Void = { _ in }
     var onWheel: (CGFloat) -> Void = { _ in }
     var onDoubleClick: () -> Void = {}
-    private let view = PadView()
+    fileprivate let view = PadView()
     var mapWidth: CGFloat { view.mapRect.width }
 
     init(screen: NSScreen) {
@@ -1541,17 +1841,15 @@ final class ScrollPad: NSPanel {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [weak self] in self?.update(offset: 0) }
     }
 
-    func update(offset: CGFloat) {
+    /// `offset` is where the strip is (or is heading, gliding over `duration`).
+    func update(offset: CGFloat, duration: CFTimeInterval = 0, timing: CAMediaTimingFunction? = nil) {
         let (cols, start, visible) = layout()
-        view.columns = cols
-        view.viewport = (start, visible)
-        view.needsDisplay = true
+        view.map.columns = cols
+        view.map.setViewport((start, visible), duration: duration, timing: timing)
     }
 }
 
 private final class PadView: NSView {
-    var columns: [CGFloat] = [] { didSet { map.columns = columns } }
-    var viewport: (CGFloat, CGFloat) = (0, 1) { didSet { map.viewport = viewport; map.needsDisplay = true } }
     var onDrag: (CGFloat) -> Void = { _ in }
     var onRelease: (CGFloat) -> Void = { _ in }
     var onWheel: (CGFloat) -> Void = { _ in }
@@ -1559,7 +1857,7 @@ private final class PadView: NSView {
     private var last: (x: CGFloat, t: TimeInterval)?
     private var velocity: CGFloat = 0
     private let glass = NSVisualEffectView()
-    private let map = MapView()
+    let map = MapView()
 
     var mapRect: CGRect { bounds.insetBy(dx: 12, dy: 10) }
 
@@ -1619,10 +1917,58 @@ private final class PadView: NSView {
     }
 }
 
-/// The strip in miniature: columns and the part on screen.
+/// The strip in miniature: columns and the part on screen. The columns are drawn
+/// only when they change; the part on screen is a layer that just moves, gliding
+/// with the strip in the window server.
 private final class MapView: NSView {
-    var columns: [CGFloat] = []
-    var viewport: (CGFloat, CGFloat) = (0, 1)
+    var columns: [CGFloat] = [] { didSet { if columns != oldValue { needsDisplay = true } } }
+    private var viewport: (CGFloat, CGFloat) = (0, 1)
+    private let viewportLayer = CALayer()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        viewportLayer.cornerRadius = 5
+        viewportLayer.borderWidth = 1.5
+        layer?.addSublayer(viewportLayer)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func viewportRect(_ v: (CGFloat, CGFloat)) -> CGRect {
+        let map = bounds.insetBy(dx: 12, dy: 10)
+        return CGRect(x: map.minX + map.width * v.0, y: map.minY - 3, width: map.width * v.1, height: map.height + 6)
+    }
+
+    func setViewport(_ v: (CGFloat, CGFloat), duration: CFTimeInterval, timing: CAMediaTimingFunction?) {
+        viewport = v
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let now = viewportLayer.presentation() ?? viewportLayer
+        let from = (now.position, now.bounds)
+        viewportLayer.removeAllAnimations()
+        viewportLayer.frame = viewportRect(v)
+        if duration > 0 {
+            for (key, a, b) in [("position", NSValue(point: from.0), NSValue(point: viewportLayer.position)),
+                                ("bounds", NSValue(rect: from.1), NSValue(rect: viewportLayer.bounds))] where a != b {
+                let anim = CABasicAnimation(keyPath: key)
+                anim.fromValue = a
+                anim.toValue = b
+                anim.duration = duration
+                anim.timingFunction = timing
+                viewportLayer.add(anim, forKey: key)
+            }
+        }
+        CATransaction.commit()
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        viewportLayer.frame = viewportRect(viewport)
+        CATransaction.commit()
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         let map = bounds.insetBy(dx: 12, dy: 10)
@@ -1634,12 +1980,8 @@ private final class MapView: NSView {
             NSBezierPath(roundedRect: r, xRadius: 3, yRadius: 3).fill()
             x += w
         }
-        let vp = CGRect(x: map.minX + map.width * viewport.0, y: map.minY - 3, width: map.width * viewport.1, height: map.height + 6)
-        NSColor.controlAccentColor.withAlphaComponent(0.35).setFill()
-        let path = NSBezierPath(roundedRect: vp, xRadius: 5, yRadius: 5)
-        path.fill()
-        NSColor.controlAccentColor.setStroke()
-        path.lineWidth = 1.5
-        path.stroke()
+        // The accent can change while the strip is on.
+        viewportLayer.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.35).cgColor
+        viewportLayer.borderColor = NSColor.controlAccentColor.cgColor
     }
 }
