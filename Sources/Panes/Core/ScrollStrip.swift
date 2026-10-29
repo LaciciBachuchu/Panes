@@ -49,6 +49,7 @@ final class ScrollStrip {
     /// Closing a window often only orders it out, with no notice: look twice a second.
     private var goneCheck: Timer?
     private var padFollow: Timer?
+    private var freshen: Timer?
     private var activationObserver: Any?
     private var launchObserver: Any?
     private var dockClickMonitor: Any?
@@ -152,7 +153,7 @@ final class ScrollStrip {
         // Pictures now, while every window is still where it can be seen: parked ones
         // can't be captured later.
         if WindowCapture.hasPermission {
-            for (id, _, _) in found { if let img = WindowCapture.snapshot(id) { snapshots[id] = img } }
+            for (id, _, _) in found { if let img = WindowCapture.snapshot(id) { store([id: img]) } }
         }
         // Columns in the order the windows were last used (the window server lists them
         // front to back): the one in use on the left, then the one before it, and so
@@ -224,6 +225,7 @@ final class ScrollStrip {
         if let o = spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
         spaceObserver = nil
         snapshots = [:]
+        snapshotTaken = [:]
         closePeek()
         overview?.close(); overview = nil
         // A stow still under way must land before the windows go back.
@@ -387,6 +389,16 @@ final class ScrollStrip {
     /// The last cover, fading off the real windows after a stop.
     private var fading: StripProxy?
     private var snapshots: [CGWindowID: CGImage] = [:]
+    /// When each picture was taken.
+    private var snapshotTaken: [CGWindowID: Date] = [:]
+
+    private func store(_ shots: [CGWindowID: CGImage]) {
+        let now = Date()
+        for (id, img) in shots {
+            snapshots[id] = img
+            snapshotTaken[id] = now
+        }
+    }
     private var wheelTarget: CGFloat?
     private var wheelIdle: DispatchWorkItem?
     private var pad: ScrollPad?
@@ -629,7 +641,9 @@ final class ScrollStrip {
 
     /// How long a motion may wait for fresh pictures of the windows on screen before
     /// going ahead with the ones in hand.
-    private static let freshWait: TimeInterval = 0.15
+    private static let freshWait: TimeInterval = 0.12
+    /// A picture younger than this counts as fresh.
+    private static let freshAge: TimeInterval = 1.5
     /// How far the pictures trail the fingers, smoothing out uneven events.
     private static let followLag: TimeInterval = 0.04
 
@@ -647,7 +661,24 @@ final class ScrollStrip {
             return .none
         }
         let layout = start ?? trueFrames()
-        guard fresh else { raiseCover(layout); return .ready }
+        // Moving again while the last cover is still fading off: it's exact, take it back.
+        if let f = fading {
+            fading = nil
+            f.revive()
+            f.layout(layout)
+            proxy = f
+            Debug.log("strip: cover taken back from the fade")
+            afterMoves { [weak self, weak f] in
+                guard let self, let f, self.proxy === f else { return }
+                self.stowWindows(done: {})
+            }
+            return .ready
+        }
+        // Retake only pictures more than a moment old: going again soon after a stop
+        // (or with the window you're in kept fresh while idle) starts at once.
+        let shown = layout.filter { $0.1.intersects(area) }
+        let stale = Set(shown.map(\.0).filter { (snapshotTaken[$0] ?? .distantPast).timeIntervalSinceNow < -Self.freshAge })
+        guard fresh, !stale.isEmpty else { raiseCover(layout); return .ready }
         coverCount += 1
         let n = coverCount, asked = Date()
         coverPending = n
@@ -664,16 +695,15 @@ final class ScrollStrip {
         // Windows wholly on screen are quick to picture where they are; one cut by the
         // screen edge only comes whole through ScreenCaptureKit, which is slow: its
         // picture swaps in whenever it arrives.
-        let shown = layout.filter { $0.1.intersects(area) }
-        let whole = shown.filter { area.insetBy(dx: -1, dy: -1).contains($0.1) }.map(\.0)
-        let cut = shown.map(\.0).filter { !whole.contains($0) }
+        let whole = shown.filter { stale.contains($0.0) && area.insetBy(dx: -1, dy: -1).contains($0.1) }.map(\.0)
+        let cut = stale.filter { !whole.contains($0) }.map { $0 }
         WindowCapture.captureOnScreen(whole) { [weak self] shots in
-            self?.snapshots.merge(shots) { $1 }
+            self?.store(shots)
             go(true)
         }
         WindowCapture.capture(cut) { [weak self] shots in
             guard let self, self.isActive else { return }
-            self.snapshots.merge(shots) { $1 }
+            self.store(shots)
             self.proxy?.update(images: shots)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.freshWait) { go(false) }
@@ -848,11 +878,15 @@ final class ScrollStrip {
         // pictures still cover it, not as a second change after they've gone.
         if focusOnRest { focusFrontColumn() }
         focusOnRest = false
-        placeWindows(resizing: resizing) { [weak self] in
-            Debug.log("strip: windows back in \(Int(Date().timeIntervalSince(began) * 1000))ms")
-            // Two frames for the window server to show them, then the pictures fade off
+        // Where the windows you'll see are going: the pictures stay until they're there.
+        let targets = columns.indices.filter { !isParked($0, at: offset) }.map { (columns[$0].id, frame(of: $0, at: offset).origin) }
+        // Counted from once the stepping aside is done (a still-moving window could
+        // otherwise look in place before it has even left).
+        afterMoves { [weak self] in self?.whenInPlace(targets) {
+            Debug.log("strip: windows in place after \(Int(Date().timeIntervalSince(began) * 1000))ms")
+            // A frame for the window server to show them, then the pictures fade off
             // them — unless the strip is already moving again.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0 / 60) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { [weak self] in
                 guard let p else { return }
                 guard let self, self.proxy == nil, self.overview == nil else { return p.close() }
                 self.fading?.close()
@@ -862,12 +896,30 @@ final class ScrollStrip {
                     if self?.fading === p { self?.fading = nil }
                 }
             }
+        } }
+        placeWindows(resizing: resizing) { [weak self] in
+            Debug.log("strip: windows back in \(Int(Date().timeIntervalSince(began) * 1000))ms")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 guard let self, self.isActive, self.proxy == nil, self.overview == nil else { return }
                 self.fitColumnsToWindows()
                 self.refreshSnapshots(visibleOnly: true)
             }
         }
+    }
+
+    /// Calls `f` once the window server shows each window at its spot. A busy app
+    /// can take a good while to move its window (Claude while it streams a reply):
+    /// lifting the pictures before that left a hole for a moment. At most `limit`.
+    private func whenInPlace(_ targets: [(CGWindowID, CGPoint)], limit: TimeInterval = 1.2, _ f: @escaping () -> Void) {
+        let until = Date() + limit
+        func check() {
+            let there = targets.allSatisfy { id, p in
+                AXWindow.serverFrame(of: id).map { abs($0.minX - p.x) < 2 && abs($0.minY - p.y) < 2 } ?? true
+            }
+            if there || Date() > until { return f() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 120) { check() }
+        }
+        check()
     }
 
     /// Columns as they look now at their column size: every one (parked ones too),
@@ -880,12 +932,12 @@ final class ScrollStrip {
         if visibleOnly, !whole.isEmpty {
             WindowCapture.captureOnScreen(Array(whole)) { [weak self] shots in
                 guard let self, self.isActive else { return }
-                self.snapshots.merge(shots) { $1 }
+                self.store(shots)
             }
         }
         WindowCapture.capture(visibleOnly ? ids.filter { !whole.contains($0) } : ids) { [weak self] shots in
             guard let self, self.isActive else { return }
-            self.snapshots.merge(shots) { $1 }
+            self.store(shots)
             done?(shots)
         }
     }
@@ -963,7 +1015,11 @@ final class ScrollStrip {
         // be slow to answer while it closes the window.
         if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier, columns.contains(where: { $0.window.pid == pid }) {
             DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-                let ids = AXWindow.windowIDs(of: pid)
+                // Asked twice a moment apart: a busy app can leave a window out once.
+                let first = AXWindow.windowIDs(of: pid)
+                usleep(120_000)
+                let second = AXWindow.windowIDs(of: pid)
+                let ids = first.flatMap { a in second.map { a.union($0) } }
                 DispatchQueue.main.async {
                     // Mid-glide too: the others close the gap from where they show.
                     guard let self, self.isActive, self.coverPending == nil, self.overview == nil else { return }
@@ -1066,7 +1122,7 @@ final class ScrollStrip {
             // A window coming back keeps the frame it had before it first joined.
             if originals[id] == nil { originals[id] = f }
             originalWindows[id] = w
-            if WindowCapture.hasPermission, let img = WindowCapture.snapshot(id) { snapshots[id] = img }
+            if WindowCapture.hasPermission, let img = WindowCapture.snapshot(id) { store([id: img]) }
             let share = Self.presets.min { abs($0 - f.width / area.width) < abs($1 - f.width / area.width) }!
             let c = Column(id: id, window: w, width: (area.width * share).rounded())
             if let after = returnAfter.removeValue(forKey: id) {
@@ -1122,6 +1178,20 @@ final class ScrollStrip {
         goneCheck = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self, self.proxy == nil, self.overview == nil, self.moving == nil else { return }
             self.dropGoneColumns()
+        }
+        // The window you're in is the one that changes (typing, a reply streaming in):
+        // its picture is kept fresh while the strip is still, so the next scroll can
+        // start at once. Only when it's wholly on screen (the quick way to take it).
+        freshen = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self, self.proxy == nil, self.coverPending == nil, self.overview == nil, self.moving == nil,
+                  let id = self.lastFocusedColumn, NSWorkspace.shared.frontmostApplication?.processIdentifier
+                    == self.columns.first(where: { $0.id == id })?.window.pid,
+                  let f = self.trueFrames().first(where: { $0.0 == id })?.1,
+                  self.area.insetBy(dx: -1, dy: -1).contains(f) else { return }
+            WindowCapture.captureOnScreen([id]) { [weak self] shots in
+                guard let self, self.isActive, self.proxy == nil else { return }
+                self.store(shots)
+            }
         }
         // The Dock changes width as apps come and go: the pad keeps to the room left of it.
         padFollow = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
@@ -1203,6 +1273,8 @@ final class ScrollStrip {
         goneCheck = nil
         padFollow?.invalidate()
         padFollow = nil
+        freshen?.invalidate()
+        freshen = nil
         edgeSensors.forEach { $0.orderOut(nil) }
         edgeSensors = []
         if let o = activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
@@ -1700,6 +1772,9 @@ final class StripProxy {
             sh.shadowOpacity = 0.28
             sh.shadowRadius = 14
             sh.shadowOffset = CGSize(width: 0, height: -8)
+            // Blurred once and reused while it only moves.
+            sh.shouldRasterize = true
+            sh.rasterizationScale = NSScreen.main?.backingScaleFactor ?? 2
             root.addSublayer(sh)
             shadows[id] = sh
         }
@@ -1755,6 +1830,7 @@ final class StripProxy {
             a.toValue = to
             a.duration = duration
             a.timingFunction = timing
+            a.preferredFrameRateRange = Self.frameRate
             l.add(a, forKey: key)
         }
         for (id, f) in frames {
@@ -1781,18 +1857,36 @@ final class StripProxy {
     /// The real windows are in place under the pictures: let them show through
     /// over a moment, so whatever differs (focus styling, a window that redrew)
     /// blends instead of popping. The window server runs the fade.
+    private var fadingOut = false
+
     func fadeOut(duration: CFTimeInterval) {
+        fadingOut = true
         CATransaction.begin()
-        CATransaction.setCompletionBlock { [self] in panel.orderOut(nil) }
+        CATransaction.setCompletionBlock { [self] in if fadingOut { panel.orderOut(nil) } }
         let a = CABasicAnimation(keyPath: "opacity")
         a.fromValue = 1
         a.toValue = 0
         a.duration = duration
         a.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        a.preferredFrameRateRange = Self.frameRate
         root.opacity = 0
         root.add(a, forKey: "fade")
         CATransaction.commit()
     }
+
+    /// Fading off, but the strip moves again: back to fully there.
+    func revive() {
+        fadingOut = false
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        root.removeAnimation(forKey: "fade")
+        root.opacity = 1
+        CATransaction.commit()
+        panel.orderFrontRegardless()
+    }
+
+    /// The display's full rate (120 Hz here), not a throttled one.
+    static let frameRate = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
 
     /// Fresher pictures arrived mid-motion.
     func update(images: [CGWindowID: CGImage]) {
@@ -1889,7 +1983,7 @@ final class ScrollPad: NSPanel {
 
     /// Bottom left, in the free space left of the Dock's icons, the Dock's twin: the
     /// same height, the same distance off the bottom (and as far from the left edge),
-    /// 8pt short of it. When there's no room there, just above the Dock. Never on
+    /// 4pt short of it. When there's no room there, just above the Dock. Never on
     /// top of the Dock.
     static func placement(on screen: NSScreen) -> CGRect {
         let f = screen.frame, vf = screen.visibleFrame
@@ -1897,9 +1991,11 @@ final class ScrollPad: NSPanel {
         let width: CGFloat = 260
         guard band >= 30 else { return CGRect(x: vf.minX + 8, y: vf.minY + 8, width: width, height: 52) }
         // All the room up to the Dock (it follows the Dock as apps come and go).
-        if let dock = dockIconsFrame(), dock.minY >= f.minY, dock.minY < vf.minY {
+        if let list = dockIconsFrame(), list.minY >= f.minY, list.minY < vf.minY {
+            // The glass itself sits 2pt lower and is 2pt shorter than the Dock reports.
+            let dock = CGRect(x: list.minX, y: list.minY - 2, width: list.width, height: list.height - 2)
             let margin = dock.minY - f.minY
-            let room = dock.minX - f.minX - margin - 8
+            let room = dock.minX - f.minX - margin - 4
             if room >= 140 { return CGRect(x: f.minX + margin, y: dock.minY, width: min(480, room), height: dock.height) }
         } else {
             let room = f.midX - f.minX - 16
@@ -1956,7 +2052,8 @@ private final class PadView: NSView {
         if #available(macOS 26, *) {
             // Liquid Glass, as the Dock is made of.
             let g = NSGlassEffectView()
-            g.style = .regular
+            // The Dock's glass is the see-through kind.
+            g.style = .clear
             g.cornerRadius = Self.corner(for: frame.height)
             map.frame = CGRect(origin: .zero, size: frame.size)
             map.autoresizingMask = [.width, .height]
@@ -2075,6 +2172,7 @@ private final class MapView: NSView {
                 anim.toValue = b
                 anim.duration = duration
                 anim.timingFunction = timing
+                anim.preferredFrameRateRange = StripProxy.frameRate
                 viewportLayer.add(anim, forKey: key)
             }
         }
